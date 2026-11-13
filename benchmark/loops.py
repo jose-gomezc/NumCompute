@@ -10,7 +10,7 @@ import math
 
 import numpy as np
 
-from numcompute.io import DEFAULT_MISSING
+from numcompute_stream.io import DEFAULT_MISSING
 
 
 # io / metrics

@@ -1,23 +1,23 @@
-# Packaging configuration task allocation: shared by all members.
-# Each member keeps package metadata and tests aligned with their module.
+# Packaging configuration for NumCompute-Stream (Assignment 2.2).
 
 [build-system]
 requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "numcompute"
-version = "0.1.0"
-description = "A NumPy-only scientific computing toolkit: I/O, preprocessing, sort/search, ranking, statistics, metrics, finite-difference gradients and pipelines."
+name = "numcompute-stream"
+version = "0.2.0"
+description = "A NumPy-only streaming machine learning toolkit: buffered decision tree, incremental preprocessing, statistics and metrics, pipelines and matplotlib visualisation."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.23"]
+dependencies = ["numpy>=1.23", "matplotlib>=3.7"]
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
+demo = ["ipykernel"]
 
 [tool.setuptools]
-packages = ["numcompute"]
+packages = ["numcompute_stream"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

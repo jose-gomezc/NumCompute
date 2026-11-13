@@ -17,8 +17,8 @@ from pathlib import Path
 import numpy as np
 
 from benchmark import loops
-from numcompute import io, metrics, preprocessing, rank, sort_search, stats
-from numcompute.benchmarking import compare, environment_info, format_table
+from numcompute_stream import io, metrics, preprocessing, rank, sort_search, stats
+from numcompute_stream.benchmarking import compare, environment_info, format_table
 
 SEED = 42
 DEFAULT_OUTPUT = Path(__file__).with_name("results.md")

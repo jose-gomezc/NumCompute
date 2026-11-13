@@ -3,7 +3,7 @@ from itertools import count
 import numpy as np
 import pytest
 
-from numcompute.utils import (
+from numcompute_stream.utils import (
     check_array,
     iter_batches,
     iter_line_batches,
