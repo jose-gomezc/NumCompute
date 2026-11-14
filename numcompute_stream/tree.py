@@ -16,7 +16,7 @@ import time
 import numpy as np
 
 from .metrics import _check_labels, _check_same_family, accuracy
-from .utils import check_array
+from .utils import _check_int, check_array
 
 # All that can be imported from this module
 __all__ = [
@@ -744,14 +744,6 @@ def _check_Xy(X, y) -> tuple[np.ndarray, np.ndarray]:
 
     return X, y
 
-
-def _check_int(value, name: str, minimum: int) -> None:
-    """Raise if ``value`` is not an integer >= ``minimum`` (bool rejected)."""
-    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
-        raise TypeError(f"{name} must be an integer, got {value!r}")
-
-    if value < minimum:
-        raise ValueError(f"{name} must be >= {minimum}, got {value}")
 
 
 def _check_max_features(max_features) -> None:

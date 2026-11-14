@@ -140,6 +140,15 @@ def check_array(X, ndim: int = None) -> np.ndarray:
     return X
 
 
+def _check_int(value, name: str, minimum: int) -> None:
+    """Raise if ``value`` is not an integer >= ``minimum`` (bool rejected)."""
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{name} must be an integer, got {value!r}")
+
+    if value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}, got {value}")
+
+
 def iter_batches(X: np.ndarray, batch_size: int):
     """Yield consecutive row slices, including a shorter final batch.
 
