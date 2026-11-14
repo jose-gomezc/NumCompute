@@ -2,10 +2,14 @@
 
 X is always (n_samples, n_features). Column statistics ignore NaN; NaN passes
 through transform unchanged, so impute first if that is not wanted.
+
+Every transformer also has ``partial_fit(X_chunk)`` for streams: it updates the
+learnt statistics with one chunk, and ``fit`` is ``partial_fit`` on fresh state.
 """
 
 import numpy as np
 
+from .stats import StreamingStats, _chunk_moments, _merge_moments
 from .utils import check_array
 
 
@@ -44,6 +48,23 @@ def _check_fitted(transformer, X: np.ndarray) -> None:
         raise ValueError(f"expected {transformer.n_features_in_} features, got shape {X.shape}")
 
 
+def _is_empty_chunk(X) -> bool:
+    """True for a 2-D chunk with no rows, which partial_fit ignores."""
+    return np.ndim(X) == 2 and np.shape(X)[0] == 0
+
+
+def _check_n_features(transformer, X: np.ndarray) -> None:
+    """Raise if X has a different feature count than the data already seen."""
+    if hasattr(transformer, "n_features_in_") and X.shape[1] != transformer.n_features_in_:
+        raise ValueError(f"expected {transformer.n_features_in_} features, got shape {X.shape}")
+
+
+def _clear(transformer, names: tuple) -> None:
+    """Delete learnt attributes so the next update starts from scratch."""
+    for name in names:
+        transformer.__dict__.pop(name, None)
+
+
 class StandardScaler:
     """Standardize each feature using its fitted mean and population standard deviation.
 
@@ -55,6 +76,8 @@ class StandardScaler:
         Population standard deviations, with zero scales replaced by one.
     n_features_in_ : int
         Number of input columns recorded during fit.
+    n_samples_seen_ : ndarray of int, shape (n_features,)
+        Non-NaN values seen per column.
 
     Raises
     ------
@@ -68,9 +91,11 @@ class StandardScaler:
     Notes
     -----
     Training constant columns become zero; NaNs pass through transform.
-    All-NaN columns retain NaN statistics and may emit NumPy warnings.
+    All-NaN columns retain NaN statistics.
     Fit and transform take O(n*d) time for n samples and d features. Stored
     state is O(d); conversion, reduction temporaries and output can use O(n*d).
+    Running moments use the Chan/Welford merge, so ``partial_fit`` over chunks
+    matches ``fit`` on all rows.
     """
 
     def fit(self, X: np.ndarray) -> "StandardScaler":
@@ -97,12 +122,55 @@ class StandardScaler:
         -----
         Time: O(n_samples * n_features). Extra space: O(n_samples * n_features)
         including dtype conversion and NumPy reduction temporaries; stored state O(n_features).
-        All-NaN columns retain NaN statistics and may emit NumPy warnings.
+        All-NaN columns retain NaN statistics.
         """
         X = check_array(X, ndim=2)
+        _clear(self, ("n_samples_seen_", "_mean", "_m2", "mean_", "scale_", "n_features_in_"))
+        return self._update(X)
 
-        self.mean_ = np.nanmean(X, axis=0)
-        self.scale_ = np.nanstd(X, axis=0)
+    def partial_fit(self, X: np.ndarray) -> "StandardScaler":
+        """Update the running means and standard deviations with one chunk.
+
+        Parameters
+        ----------
+        X : array_like, shape (n_samples, n_features)
+            Numeric chunk; NaNs are ignored. A chunk with 0 rows is ignored.
+
+        Returns
+        -------
+        StandardScaler
+            The updated instance (self).
+
+        Raises
+        ------
+        TypeError
+            If X cannot be converted to numbers.
+        ValueError
+            If X is not two-dimensional or its feature count differs from earlier data.
+
+        Notes
+        -----
+        Time: O(n_samples * n_features). Stored state: O(n_features).
+        """
+        if _is_empty_chunk(X):
+            return self
+
+        X = check_array(X, ndim=2)
+        _check_n_features(self, X)
+        return self._update(X)
+
+    def _update(self, X: np.ndarray) -> "StandardScaler":
+        """Merge X's moments into the running state and refresh mean_ and scale_."""
+        count, mean, m2 = _chunk_moments(X)
+
+        if hasattr(self, "n_samples_seen_"):
+            count, mean, m2 = _merge_moments(self.n_samples_seen_, self._mean, self._m2, count, mean, m2)
+
+        # _mean keeps 0 for unseen columns so later merges work; mean_ shows NaN there
+        seen = count > 0
+        self.n_samples_seen_, self._mean, self._m2 = count, mean, m2
+        self.mean_ = np.where(seen, mean, np.nan)
+        self.scale_ = np.sqrt(np.divide(m2, count, out=np.full(m2.shape, np.nan), where=seen))
         self.scale_[self.scale_ == 0] = 1.0       # constant column: do not divide by zero
         self.n_features_in_ = X.shape[1]
         return self
@@ -181,6 +249,8 @@ class MinMaxScaler:
         Configured output interval.
     data_min_ : ndarray, shape (n_features,)
         Column minima, ignoring NaN.
+    data_max_ : ndarray, shape (n_features,)
+        Column maxima, ignoring NaN.
     data_range_ : ndarray, shape (n_features,)
         Column ranges; constant-column ranges are replaced by infinity.
     n_features_in_ : int
@@ -255,12 +325,52 @@ class MinMaxScaler:
         -----
         Time: O(n_samples * n_features). Extra space: O(n_samples * n_features)
         including dtype conversion and NumPy reduction temporaries; stored state O(n_features).
-        All-NaN columns retain NaN statistics and may emit NumPy warnings.
+        All-NaN columns retain NaN statistics.
         """
         X = check_array(X, ndim=2)
+        _clear(self, ("data_min_", "data_max_", "data_range_", "n_features_in_"))
+        return self._update(X)
 
-        self.data_min_ = np.nanmin(X, axis=0)
-        self.data_range_ = np.nanmax(X, axis=0) - self.data_min_
+    def partial_fit(self, X: np.ndarray) -> "MinMaxScaler":
+        """Update the running column minima and maxima with one chunk.
+
+        Parameters
+        ----------
+        X : array_like, shape (n_samples, n_features)
+            Numeric chunk; NaNs are ignored. A chunk with 0 rows is ignored.
+
+        Returns
+        -------
+        MinMaxScaler
+            The updated instance (self).
+
+        Raises
+        ------
+        TypeError
+            If X cannot be converted to numbers.
+        ValueError
+            If X is not two-dimensional or its feature count differs from earlier data.
+
+        Notes
+        -----
+        Time: O(n_samples * n_features). Stored state: O(n_features).
+        """
+        if _is_empty_chunk(X):
+            return self
+
+        X = check_array(X, ndim=2)
+        _check_n_features(self, X)
+        return self._update(X)
+
+    def _update(self, X: np.ndarray) -> "MinMaxScaler":
+        """Widen the stored minima and maxima with X and refresh data_range_."""
+        low, high = np.fmin.reduce(X, axis=0), np.fmax.reduce(X, axis=0)    # ignore NaN
+
+        if hasattr(self, "data_min_"):
+            low, high = np.fmin(self.data_min_, low), np.fmax(self.data_max_, high)
+
+        self.data_min_, self.data_max_ = low, high
+        self.data_range_ = high - low
         self.data_range_[self.data_range_ == 0] = np.inf   # constant column: (x - min) / inf = 0
         self.n_features_in_ = X.shape[1]
         return self
@@ -366,6 +476,8 @@ class SimpleImputer:
     replaces '', 'nan' and 'None'. Mean/constant fitting and transformation
     take O(n*d) time; median has a conservative O(d*n*log(n)) bound. Working
     space is O(n*d), with O(d) stored statistics, for bounded string lengths.
+    With ``partial_fit``, the mean is exact and the median is approximated
+    from a ``StreamingStats`` histogram (error at most one bin width).
     """
 
     def __init__(self, strategy: str = None, fill_value=None):
@@ -467,18 +579,75 @@ class SimpleImputer:
         All-NaN numeric columns use fill_value instead of a mean or median.
         """
         X = self._as_array(X)
+        _clear(self, ("statistics_", "n_features_in_", "_moments", "_stats"))
+        self._update(X)
+
+        # A full batch gets the exact median; the histogram is kept for later partial_fit calls
+        if self.strategy == "median":
+            all_nan = np.isnan(X).all(axis=0)
+            X_safe = np.where(all_nan, 0.0, X)      # nanmedian warns on an all-NaN column
+            self.statistics_ = np.nanmedian(X_safe, axis=0)
+            self.statistics_[all_nan] = self.fill_value
+
+        return self
+
+    def partial_fit(self, X: np.ndarray) -> "SimpleImputer":
+        """Update the replacement values with one chunk.
+
+        Parameters
+        ----------
+        X : array_like, shape (n_samples, n_features)
+            Chunk of data, missing cells as in ``fit``. A chunk with 0 rows is ignored.
+
+        Returns
+        -------
+        SimpleImputer
+            The updated instance (self).
+
+        Raises
+        ------
+        TypeError
+            If X cannot be converted to numbers.
+        ValueError
+            If X is not two-dimensional or its feature count differs from earlier data.
+
+        Notes
+        -----
+        The mean is exact; the median is approximate (infinite values are
+        ignored by it). Columns with no values yet use ``fill_value``.
+        Time: O(n_samples * n_features). Stored state: O(n_features), or
+        O(n_features * n_bins) for the median.
+        """
+        if _is_empty_chunk(X):
+            return self
+
+        X = self._as_array(X)
+        _check_n_features(self, X)
+        return self._update(X)
+
+    def _update(self, X: np.ndarray) -> "SimpleImputer":
+        """Merge X into the running statistics and refresh statistics_."""
         n_features = X.shape[1]
 
         if self.strategy == "constant":
             self.statistics_ = np.full(n_features, self.fill_value)
+
+        elif self.strategy == "mean":
+            moments = _chunk_moments(X)
+
+            if hasattr(self, "_moments"):
+                moments = _merge_moments(*self._moments, *moments)
+
+            self._moments = moments
+            self.statistics_ = np.where(moments[0] > 0, moments[1], self.fill_value)
+
         else:
-            all_nan = np.isnan(X).all(axis=0)
-            X_safe = np.where(all_nan, 0.0, X)      # nanmean warns on an all-NaN column
-            if self.strategy == "mean":
-                self.statistics_ = np.nanmean(X_safe, axis=0)
-            else:
-                self.statistics_ = np.nanmedian(X_safe, axis=0)
-            self.statistics_[all_nan] = self.fill_value
+            if not hasattr(self, "_stats"):
+                self._stats = StreamingStats()
+
+            self._stats.update_stats(np.where(np.isinf(X), np.nan, X))
+            median = self._stats.quantile(0.5)
+            self.statistics_ = np.where(self._stats.count_ > 0, median, self.fill_value)
 
         self.n_features_in_ = n_features
         return self
@@ -556,7 +725,8 @@ class OneHotEncoder:
     Attributes
     ----------
     categories_ : list of ndarray
-        Sorted nonmissing string categories, one array per input feature.
+        Nonmissing string categories, one array per input feature: sorted
+        after ``fit``, with later ``partial_fit`` categories appended.
     n_features_in_ : int
         Number of fitted input columns.
     n_features_out_ : int
@@ -576,6 +746,9 @@ class OneHotEncoder:
     always encode to all-zero blocks. Output shape is (n, c), where c is the
     total category count. Fit time is O(d*n*log(n)); transform time and space
     are O(n*d + n*c), including conversion/output, for bounded string lengths.
+    ``fit`` lays out one contiguous block per feature. A category first seen by
+    ``partial_fit`` gets a new column at the end of the output, so existing
+    columns never move.
     """
 
     MISSING = MISSING
@@ -632,17 +805,70 @@ class OneHotEncoder:
         Time: O(d * n * log(n)); space O(n * d + c), where n is sample count,
         d feature count and c total categories, assuming bounded string lengths.
         """
+        X = self._as_strings(X)
+        _clear(self, ("categories_", "_columns", "n_features_in_", "n_features_out_"))
+        return self._update(X)
+
+    def partial_fit(self, X: np.ndarray) -> "OneHotEncoder":
+        """Add the categories of one chunk; each new one gets a column at the end.
+
+        Parameters
+        ----------
+        X : array_like, shape (n_samples, n_features)
+            Categories converted to strings; '', 'nan' and 'None' are missing.
+            A chunk with 0 rows is ignored.
+
+        Returns
+        -------
+        OneHotEncoder
+            The updated instance (self); ``n_features_out_`` grows by the
+            number of new categories.
+
+        Raises
+        ------
+        ValueError
+            If X is not two-dimensional or its feature count differs from earlier data.
+        TypeError
+            If X cannot be converted to strings.
+
+        Notes
+        -----
+        Earlier output columns keep their positions, so data encoded before is
+        still valid: it is zero in the new columns. Time: O(d * n * log(n)).
+        """
+        if _is_empty_chunk(X):
+            return self
+
+        X = self._as_strings(X)
+        _check_n_features(self, X)
+        return self._update(X)
+
+    def _as_strings(self, X) -> np.ndarray:
+        """Convert X to a non-empty 2-D string array."""
         X = np.asarray(X).astype(str)
+
         if X.ndim != 2 or X.size == 0:
             raise ValueError(f"X must be a non-empty 2-D array, got shape {X.shape}")
 
-        self.categories_ = []
-        for column in X.T:
+        return X
+
+    def _update(self, X: np.ndarray) -> "OneHotEncoder":
+        """Append X's unseen categories per feature, with output columns at the end."""
+        if not hasattr(self, "categories_"):
+            self.categories_ = [np.array([], dtype=str) for _ in range(X.shape[1])]
+            self._columns = [np.array([], dtype=np.int64) for _ in range(X.shape[1])]
+            self.n_features_out_ = 0
+
+        for j, column in enumerate(X.T):
             present = ~np.isin(column, self.MISSING)
-            self.categories_.append(np.unique(column[present]))
+            new = np.setdiff1d(column[present], self.categories_[j])     # sorted and unique
+
+            if new.size:
+                self.categories_[j] = np.concatenate([self.categories_[j], new])
+                self._columns[j] = np.concatenate([self._columns[j], self.n_features_out_ + np.arange(new.size)])
+                self.n_features_out_ += new.size
 
         self.n_features_in_ = X.shape[1]
-        self.n_features_out_ = sum(len(categories) for categories in self.categories_)
         return self
 
     def transform(self, X: np.ndarray) -> np.ndarray:
@@ -678,7 +904,6 @@ class OneHotEncoder:
         _check_fitted(self, X)
 
         out = np.zeros((X.shape[0], self.n_features_out_))
-        start = 0
         for j, categories in enumerate(self.categories_):
             column = X[:, j]
             block = column[:, None] == categories          # (n, c) by broadcasting
@@ -687,8 +912,7 @@ class OneHotEncoder:
             if unknown.any() and self.handle_unknown == "error":
                 raise ValueError(f"unknown categories in column {j}: {np.unique(column[unknown]).tolist()}")
 
-            out[:, start:start + len(categories)] = block
-            start += len(categories)
+            out[:, self._columns[j]] = block                # this feature's output columns
         return out
 
     def fit_transform(self, X: np.ndarray) -> np.ndarray:
