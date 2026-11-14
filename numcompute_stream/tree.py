@@ -408,6 +408,47 @@ class DecisionTreeClassifier:
 
         return self
 
+    def add_features(self, n_new: int) -> "DecisionTreeClassifier":
+        """Accept ``n_new`` extra columns at the end of every later chunk.
+
+        Used when an upstream one-hot encoder learns new categories. Rows
+        already in the buffer get zeros in the new columns (they did not have
+        those categories), and the current tree keeps predicting, since its
+        splits only use the earlier columns.
+
+        Parameters
+        ----------
+        n_new : int
+            Number of columns added (>= 1).
+
+        Returns
+        -------
+        DecisionTreeClassifier
+            The instance (self).
+
+        Raises
+        ------
+        TypeError
+            If ``n_new`` is not an integer.
+        ValueError
+            If ``n_new`` < 1, or no data has been seen yet.
+
+        Notes
+        -----
+        Time and extra space: O(n_buffered * n_new).
+        """
+        _check_int(n_new, "n_new", minimum=1)
+
+        if self._expected_n_features() is None:
+            raise ValueError("add_features needs earlier data; the first chunk sets the feature count")
+
+        self._buffer_X = [np.hstack([chunk, np.zeros((chunk.shape[0], n_new))]) for chunk in self._buffer_X]
+
+        if hasattr(self, "n_features_in_"):
+            self.n_features_in_ += n_new
+
+        return self
+
     def _train(self, X: np.ndarray, y: np.ndarray, classes: np.ndarray, rng) -> None:
         """Build a new tree on X, y with the given sorted class list and random generator."""
         start = time.perf_counter()
