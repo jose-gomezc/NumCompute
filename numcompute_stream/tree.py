@@ -5,12 +5,17 @@ left. The split search is vectorised: each feature is sorted once and a
 cumulative sum of one-hot labels gives the class counts on both sides of every
 threshold, so all candidate splits are scored without a Python loop.
 
+For streams, ``partial_fit`` buffers incoming chunks and retrains the tree
+once the buffer holds at least ``buffer_size`` rows.
+
 Shapes: ``X`` is (n_samples, n_features); ``y`` is (n_samples,).
 """
 
+import time
+
 import numpy as np
 
-from .metrics import _check_labels, accuracy
+from .metrics import _check_labels, _check_same_family, accuracy
 from .utils import check_array
 
 # All that can be imported from this module
@@ -191,6 +196,8 @@ class DecisionTreeClassifier:
     ----------
     max_depth : int, default 5
         Maximum depth of the tree (>= 1).
+    buffer_size : int, default 500
+        Rows ``partial_fit`` collects before retraining (>= 1).
     min_samples_split : int, default 2
         Nodes with fewer rows become leaves (>= 2).
     max_features : None, int, float, "sqrt" or "log2", default None
@@ -207,7 +214,8 @@ class DecisionTreeClassifier:
     root_ : Node
         Root of the fitted tree.
     classes_ : ndarray, shape (n_classes,)
-        Sorted class labels seen during fit.
+        Sorted class labels of the current tree. With ``partial_fit``, every
+        label seen in the stream up to the last retrain.
     n_classes_ : int
         Number of classes.
     n_features_in_ : int
@@ -220,6 +228,12 @@ class DecisionTreeClassifier:
         Number of leaves.
     n_nodes_ : int
         Number of nodes, leaves included.
+    fit_time_ : float
+        Seconds taken by the last training.
+    n_buffered_ : int
+        Rows waiting in the buffer.
+    n_retrains_ : int
+        Retrains triggered by ``partial_fit`` or ``flush`` since the last ``fit``.
 
     Raises
     ------
@@ -235,6 +249,11 @@ class DecisionTreeClassifier:
     distinct values. Fit: O(depth * d * n log n) time and O(n * d * k) extra
     space for n rows, d features and k classes. Predict: O(n * depth).
 
+    Streaming: each ``partial_fit`` call appends its chunk to a buffer. Once
+    the buffer holds at least ``buffer_size`` rows, the tree is retrained on
+    all buffered rows and the buffer is cleared; between retrains, ``predict``
+    uses the last tree. Buffer memory: O(buffer_size * d).
+
     Examples
     --------
     >>> X = [[1.0], [2.0], [10.0], [11.0]]
@@ -246,6 +265,7 @@ class DecisionTreeClassifier:
     def __init__(
         self,
         max_depth: int = 5,
+        buffer_size: int = 500,
         min_samples_split: int = 2,
         max_features=None,
         criterion: str = "gini",
@@ -253,6 +273,7 @@ class DecisionTreeClassifier:
     ):
         # Validate hyperparameters before storing them
         _check_int(max_depth, "max_depth", minimum=1)
+        _check_int(buffer_size, "buffer_size", minimum=1)
         _check_int(min_samples_split, "min_samples_split", minimum=2)
         _check_max_features(max_features)
 
@@ -260,15 +281,17 @@ class DecisionTreeClassifier:
             raise ValueError(f"criterion must be one of {_CRITERIA}, got {criterion!r}")
 
         self.max_depth = max_depth
+        self.buffer_size = buffer_size
         self.min_samples_split = min_samples_split
         self.max_features = max_features
         self.criterion = criterion
         self.random_state = random_state
+        self._reset_stream()
 
     # -- training ------------------------------------------------------------
 
     def fit(self, X, y) -> "DecisionTreeClassifier":
-        """Train the tree from scratch on the given data.
+        """Train the tree from scratch on the given data and clear the stream buffer.
 
         Parameters
         ----------
@@ -295,24 +318,138 @@ class DecisionTreeClassifier:
         Time: O(depth * d * n log n).
         Extra space: O(n * d * k).
         """
-        X = _check_X(X)
-        y = _check_labels(y, "y")
+        X, y = _check_Xy(X, y)
 
-        if X.shape[0] != y.size:
-            raise ValueError(f"X has {X.shape[0]} rows but y has {y.size} labels")
+        self._reset_stream()
+        self._train(X, y, np.unique(y), np.random.default_rng(self.random_state))
+        self._seen_classes = self.classes_
+
+        return self
+
+    def partial_fit(self, X, y) -> "DecisionTreeClassifier":
+        """Add a chunk to the buffer; retrain once it holds at least ``buffer_size`` rows.
+
+        The retrain uses every buffered row, then clears the buffer. Between
+        retrains, ``predict`` keeps using the last tree. An empty chunk
+        (0 rows) is ignored.
+
+        Parameters
+        ----------
+        X : array_like, shape (n_samples, n_features)
+            Finite numeric features of the chunk.
+        y : array_like, shape (n_samples,)
+            Class labels of the chunk.
+
+        Returns
+        -------
+        DecisionTreeClassifier
+            The instance (self).
+
+        Raises
+        ------
+        TypeError
+            If X is not numeric, y has an unsupported dtype, or the labels
+            change type (e.g. int to str) during the stream.
+        ValueError
+            If X is not 2-D, contains NaN or infinity, has a different number
+            of rows than y, or a different number of features than earlier data.
+
+        Notes
+        -----
+        A rejected chunk leaves the buffer unchanged. Chunks are copied, so
+        later changes to the caller's arrays do not affect the buffer.
+        Time: O(n) per call, plus a retrain when the buffer fills.
+        """
+        if np.ndim(X) == 2 and np.shape(X)[0] == 0 and np.size(y) == 0:
+            return self
+
+        X, y = _check_Xy(X, y)
+        expected = self._expected_n_features()
+
+        if expected is not None and X.shape[1] != expected:
+            raise ValueError(f"expected {expected} features, got shape {X.shape}")
+
+        if self._seen_classes is not None:
+            _check_same_family(self._seen_classes, y, ("earlier labels", "y"))
+
+        # All checks passed: only now change the stream state
+        if self._seen_classes is None:
+            self._seen_classes = np.unique(y)
+
+        else:
+            self._seen_classes = np.union1d(self._seen_classes, y)    # classes are never dropped
+
+        self._buffer_X.append(X.copy())
+        self._buffer_y.append(y.copy())
+        self.n_buffered_ += X.shape[0]
+
+        if self.n_buffered_ >= self.buffer_size:
+            self._retrain()
+
+        return self
+
+    def flush(self) -> "DecisionTreeClassifier":
+        """Retrain on the rows left in the buffer, if any, and clear it.
+
+        Useful at the end of a stream, when fewer than ``buffer_size`` rows
+        are waiting.
+
+        Returns
+        -------
+        DecisionTreeClassifier
+            The instance (self).
+
+        Notes
+        -----
+        Does nothing when the buffer is empty.
+        """
+        if self.n_buffered_:
+            self._retrain()
+
+        return self
+
+    def _train(self, X: np.ndarray, y: np.ndarray, classes: np.ndarray, rng) -> None:
+        """Build a new tree on X, y with the given sorted class list and random generator."""
+        start = time.perf_counter()
 
         # Train on class indices 0..k-1; classes_ maps them back to labels
-        self.classes_, y_idx = np.unique(y, return_inverse=True)
-        self.n_classes_ = self.classes_.size
+        self.classes_ = classes
+        self.n_classes_ = classes.size
         self.n_features_in_ = X.shape[1]
         self.max_features_ = _resolve_max_features(self.max_features, self.n_features_in_)
         self._impurity = _IMPURITY_FROM_COUNTS[self.criterion]
-        self._rng = np.random.default_rng(self.random_state)
+        self._rng = rng
 
-        self.root_ = self._build(X, y_idx, 0)
+        self.root_ = self._build(X, np.searchsorted(classes, y), 0)
         self.depth_, self.n_leaves_, self.n_nodes_ = _tree_size(self.root_)
+        self.fit_time_ = time.perf_counter() - start
 
-        return self
+    def _retrain(self) -> None:
+        """Train on all buffered rows, then clear the buffer."""
+        X = np.concatenate(self._buffer_X)
+        y = np.concatenate(self._buffer_y)
+
+        if self._stream_rng is None:
+            self._stream_rng = np.random.default_rng(self.random_state)
+
+        self._train(X, y, self._seen_classes, self._stream_rng)
+        self._buffer_X, self._buffer_y, self.n_buffered_ = [], [], 0
+        self.n_retrains_ += 1
+
+    def _reset_stream(self) -> None:
+        """Clear the buffer and the stream state."""
+        self._buffer_X, self._buffer_y = [], []
+        self.n_buffered_ = 0
+        self.n_retrains_ = 0
+        self._seen_classes = None
+        self._stream_rng = None
+
+    def _expected_n_features(self) -> int | None:
+        """Feature count fixed by the current tree or the first buffered chunk, else None."""
+        if hasattr(self, "n_features_in_"):
+            return self.n_features_in_
+
+        return self._buffer_X[0].shape[1] if self._buffer_X else None
 
     def _build(self, X: np.ndarray, y: np.ndarray, depth: int) -> Node:
         """Return a leaf if a stop rule applies, else split and build both children."""
@@ -542,7 +679,10 @@ class DecisionTreeClassifier:
     def _check_fitted(self) -> None:
         """Raise RuntimeError if ``fit`` has not been called."""
         if not hasattr(self, "root_"):
-            raise RuntimeError(f"{type(self).__name__} is not fitted; call fit(X, y) first")
+            raise RuntimeError(
+                f"{type(self).__name__} is not fitted; call fit(X, y), or partial_fit "
+                f"until {self.buffer_size} rows are buffered"
+            )
 
     def _check_predict_X(self, X) -> np.ndarray:
         """Validate X for prediction, including the fitted feature count."""
@@ -592,6 +732,17 @@ def _check_X(X) -> np.ndarray:
         raise ValueError("X contains NaN or infinity; impute first, e.g. SimpleImputer in a Pipeline")
 
     return X
+
+
+def _check_Xy(X, y) -> tuple[np.ndarray, np.ndarray]:
+    """Validate X and y for training and check they have the same number of rows."""
+    X = _check_X(X)
+    y = _check_labels(y, "y")
+
+    if X.shape[0] != y.size:
+        raise ValueError(f"X has {X.shape[0]} rows but y has {y.size} labels")
+
+    return X, y
 
 
 def _check_int(value, name: str, minimum: int) -> None:

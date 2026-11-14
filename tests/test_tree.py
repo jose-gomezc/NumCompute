@@ -132,6 +132,98 @@ def test_max_features_is_reproducible_and_export_text_shows_questions():
     assert "|   |--- attended <= 0.500" in text and "class: 1" in text
 
 
+# Streaming: buffered retraining
+
+def _stream_data(n=180):
+    rng = np.random.default_rng(4)
+    X = rng.normal(size=(n, 3))
+    return X, (X[:, 0] > 0).astype(int)
+
+
+def test_partial_fit_retrains_when_the_buffer_fills():
+    X, y = _stream_data()
+    tree = DecisionTreeClassifier(buffer_size=100)
+    for start in (0, 30, 60):
+        tree.partial_fit(X[start:start + 30], y[start:start + 30])
+    assert tree.n_buffered_ == 90 and tree.n_retrains_ == 0
+    with pytest.raises(RuntimeError, match="not fitted"):
+        tree.predict(X)
+
+    tree.partial_fit(X[90:120], y[90:120])          # 120 >= 100: retrain on all 120 rows
+    assert tree.n_retrains_ == 1 and tree.n_buffered_ == 0 and tree.fit_time_ > 0
+
+    # Between retrains, predictions come from the last tree
+    before = tree.predict(X)
+    tree.partial_fit(X[120:150], y[120:150])
+    tree.partial_fit(X[150:180], y[150:180])
+    assert tree.n_buffered_ == 60
+    np.testing.assert_array_equal(tree.predict(X), before)
+
+
+def test_retrain_matches_fit_on_the_buffered_rows():
+    X, y = _stream_data()
+    stream = DecisionTreeClassifier(buffer_size=100, max_features=2, random_state=0)
+    for start in range(0, 120, 30):
+        stream.partial_fit(X[start:start + 30], y[start:start + 30])
+    batch = DecisionTreeClassifier(max_features=2, random_state=0).fit(X[:120], y[:120])
+    assert stream.export_text() == batch.export_text()
+
+
+def test_buffer_boundaries_flush_and_fit_reset():
+    X, y = _stream_data()
+    tree = DecisionTreeClassifier(buffer_size=50).partial_fit(X[:80], y[:80])
+    assert tree.n_retrains_ == 1 and tree.n_buffered_ == 0      # one chunk larger than the buffer
+
+    one = DecisionTreeClassifier(buffer_size=1)
+    for i in range(5):
+        one.partial_fit(X[i:i + 1], y[i:i + 1])
+    assert one.n_retrains_ == 5
+
+    # flush trains on leftover rows; a second flush has nothing to do
+    tree.partial_fit(X[80:100], y[80:100]).flush()
+    assert tree.n_retrains_ == 2 and tree.n_buffered_ == 0
+    assert tree.export_text() == DecisionTreeClassifier().fit(X[80:100], y[80:100]).export_text()
+    tree.flush()
+    assert tree.n_retrains_ == 2
+
+    # fit trains from scratch and clears the stream state
+    tree.partial_fit(X[100:110], y[100:110]).fit(X, y)
+    assert tree.n_buffered_ == 0 and tree.n_retrains_ == 0
+
+
+def test_classes_seen_in_the_stream_are_kept():
+    X = [[0.0], [1.0], [2.0], [3.0], [4.0], [5.0]]
+    tree = DecisionTreeClassifier(buffer_size=6)
+    tree.partial_fit(X, [0, 0, 1, 1, 2, 2])
+    tree.partial_fit(X, [0, 0, 0, 1, 1, 1])          # class 2 is missing from this buffer
+    np.testing.assert_array_equal(tree.classes_, [0, 1, 2])
+
+    proba = tree.predict_proba([[0.0], [5.0]])
+    assert proba.shape == (2, 3)
+    np.testing.assert_array_equal(proba[:, 2], 0.0)
+
+
+def test_rejected_or_empty_chunks_leave_the_buffer_unchanged():
+    X, y = _stream_data()
+    tree = DecisionTreeClassifier(buffer_size=100).partial_fit(X[:10], y[:10])
+
+    with pytest.raises(ValueError, match="NaN"):
+        tree.partial_fit([[np.nan, 0.0, 0.0]], [1])
+    with pytest.raises(ValueError, match="expected 3 features"):
+        tree.partial_fit(X[:5, :2], y[:5])
+    with pytest.raises(TypeError, match="incompatible"):
+        tree.partial_fit(X[:2], ["a", "b"])
+    tree.partial_fit(np.empty((0, 3)), [])
+    assert tree.n_buffered_ == 10
+
+    # Chunks are copied: changing the caller's array later does not alter the buffer
+    chunk = X[10:20].copy()
+    tree.partial_fit(chunk, y[10:20])
+    chunk[:] = 1e6
+    tree.flush()
+    assert tree.export_text() == DecisionTreeClassifier().fit(X[:20], y[:20]).export_text()
+
+
 def _fitted():
     return DecisionTreeClassifier().fit(X_STUDENTS, Y_STUDENTS)
 
@@ -151,9 +243,13 @@ def _fitted():
         (lambda: DecisionTreeClassifier(min_samples_split=1), ValueError, "min_samples_split"),
         (lambda: DecisionTreeClassifier(max_features=1.5), ValueError, "max_features"),
         (lambda: DecisionTreeClassifier(criterion="mse"), ValueError, "criterion"),
+        (lambda: DecisionTreeClassifier(buffer_size=0), ValueError, "buffer_size"),
+        (lambda: DecisionTreeClassifier(buffer_size=2.5), TypeError, "buffer_size"),
+        (lambda: DecisionTreeClassifier(buffer_size=True), TypeError, "buffer_size"),
     ],
     ids=["unfitted", "n_features", "1d_X", "nan", "inf", "length", "text_X",
-         "depth_0", "depth_float", "min_split", "max_features", "criterion"],
+         "depth_0", "depth_float", "min_split", "max_features", "criterion",
+         "buffer_0", "buffer_float", "buffer_bool"],
 )
 def test_invalid_input_raises_informative_errors(call, error, match):
     with pytest.raises(error, match=match):
