@@ -21,3 +21,4 @@ packages = ["numcompute_stream"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]          # lets tests import the benchmark/ scripts

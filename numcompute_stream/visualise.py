@@ -33,7 +33,7 @@ _BLUES = LinearSegmentedColormap.from_list("okabe_blue", ["#eef4fa", "#0072B2", 
 
 def plot_metric_over_time(metric_values, title: str = "Metric over time", ylabel: str = "Value",
                           xlabel: str = "Chunk", events=None, events_label: str = "event",
-                          ax=None, save_path=None, show: bool = False):
+                          ax=None, save_path=None, show: bool = False, x=None):
     """Plot one or more metrics across chunks.
 
     Parameters
@@ -54,6 +54,9 @@ def plot_metric_over_time(metric_values, title: str = "Metric over time", ylabel
         Save the figure there; the format follows the extension.
     show : bool, default False
         Call ``plt.show()`` after drawing.
+    x : sequence of float, optional
+        Positions on the x-axis, one per value (e.g. buffer sizes); default
+        0, 1, 2, ... (the chunk index).
 
     Returns
     -------
@@ -65,7 +68,8 @@ def plot_metric_over_time(metric_values, title: str = "Metric over time", ylabel
     TypeError
         If a series is not numeric.
     ValueError
-        If a series is empty or not 1-D, or there are more than 8 series.
+        If a series is empty or not 1-D, there are more than 8 series, or
+        ``x`` does not have one position per value.
 
     Examples
     --------
@@ -78,10 +82,16 @@ def plot_metric_over_time(metric_values, title: str = "Metric over time", ylabel
     if len(series) > len(PALETTE):
         raise ValueError(f"at most {len(PALETTE)} series can be told apart, got {len(series)}")
 
+    if x is not None:
+        x = np.asarray(x, dtype=float)
+
+        if any(values.shape != x.shape for values in series.values()):
+            raise ValueError(f"x must have one position per value, got shape {x.shape}")
+
     ax = _get_axes(ax)
 
     for (label, values), colour in zip(series.items(), PALETTE):
-        ax.plot(np.arange(values.size), values, color=colour, linewidth=_LINE_WIDTH,
+        ax.plot(np.arange(values.size) if x is None else x, values, color=colour, linewidth=_LINE_WIDTH,
                 label=label, solid_capstyle="round", solid_joinstyle="round")
 
     if events is not None:

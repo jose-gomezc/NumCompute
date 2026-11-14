@@ -11,6 +11,7 @@ import math
 import numpy as np
 
 from numcompute_stream.io import DEFAULT_MISSING
+from numcompute_stream.tree import _GAIN_TOL, DecisionTreeClassifier
 
 
 # io / metrics
@@ -198,3 +199,114 @@ def _merge_sort(x):
     merged.extend(right[j:])
     
     return merged
+
+
+# Streaming tree and statistics (Assignment 2.2)
+
+def _impurity_loop(counts, n, criterion):
+    """Gini or entropy of one group from its class counts, one class at a time."""
+    if n == 0:
+        return 0.0
+
+    if criterion == "gini":
+        total = 0.0
+        for c in counts:
+            total += (c / n) ** 2
+        return 1.0 - total
+
+    total = 0.0
+    for c in counts:
+        if c:
+            p = c / n
+            total -= p * math.log2(p)
+    
+    return total
+
+
+def best_split_loop(columns, labels, n_classes, criterion="gini"):
+    """Best (column index, threshold) by information gain, or None; plain-Python sweep.
+
+    Same algorithm as the vectorised search: sort each column once, then move
+    the threshold one row at a time, keeping running class counts. Ties go to
+    the lowest column, then the lowest threshold.
+    """
+    n = len(labels)
+    total = [0] * n_classes
+    
+    for label in labels:
+        total[label] += 1
+
+    parent = _impurity_loop(total, n, criterion)
+    best_gain, best = _GAIN_TOL, None
+
+    for j, column in enumerate(columns):
+        pairs = sorted(zip(column, labels))
+        left = [0] * n_classes
+
+        for i in range(n - 1):
+            value, label = pairs[i]
+            left[label] += 1
+            upper = pairs[i + 1][0]
+
+            if upper == value:                     # a threshold must separate two values
+                continue
+
+            n_left = i + 1
+            right = [t - l for t, l in zip(total, left)]
+            after = (n_left * _impurity_loop(left, n_left, criterion)
+                     + (n - n_left) * _impurity_loop(right, n - n_left, criterion)) / n
+            gain = parent - after
+
+            if gain > best_gain + _GAIN_TOL:
+                threshold = value / 2 + upper / 2
+                best_gain, best = gain, (j, threshold if threshold < upper else value)
+
+    return best
+
+
+class LoopSplitTree(DecisionTreeClassifier):
+    """DecisionTreeClassifier whose split search is the plain-Python sweep above."""
+
+    def _best_split(self, X, y, counts):
+        """Same contract as the vectorised search, computed with Python loops."""
+        features = self._candidate_features(X)
+
+        if features.size == 0:
+            return None
+
+        columns = [X[:, f].tolist() for f in features]
+        best = best_split_loop(columns, y.tolist(), self.n_classes_, self.criterion)
+
+        return None if best is None else (int(features[best[0]]), float(best[1]))
+
+
+def predict_loop(tree, X):
+    """Predict one row at a time by walking it down the fitted tree."""
+    labels = []
+
+    for row in np.asarray(X, dtype=float).tolist():
+        node = tree.root_
+        while not node.is_leaf:
+            node = node.left if row[node.feature] <= node.threshold else node.right
+        labels.append(tree.classes_[node.label])
+
+    return np.array(labels)
+
+
+def welford_loop(chunks):
+    """Per-feature mean and population variance, updated one value at a time (Welford)."""
+    count = mean = m2 = None
+
+    for chunk in chunks:
+        for row in chunk.tolist():
+            if count is None:
+                d = len(row)
+                count, mean, m2 = [0] * d, [0.0] * d, [0.0] * d
+
+            for j, x in enumerate(row):
+                count[j] += 1
+                delta = x - mean[j]
+                mean[j] += delta / count[j]
+                m2[j] += delta * (x - mean[j])
+
+    return np.array(mean), np.array([m / c for m, c in zip(m2, count)])
