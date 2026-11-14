@@ -11,6 +11,7 @@ once the buffer holds at least ``buffer_size`` rows.
 Shapes: ``X`` is (n_samples, n_features); ``y`` is (n_samples,).
 """
 
+import sys
 import time
 
 import numpy as np
@@ -408,6 +409,25 @@ class DecisionTreeClassifier:
 
         return self
 
+    def memory_usage(self) -> dict:
+        """Memory held by the stream buffer and the fitted tree, in bytes.
+
+        Returns
+        -------
+        dict
+            ``{"buffer": int, "tree": int}``. The buffer figure is the exact
+            size of the buffered arrays; the tree figure is an estimate (each
+            node object plus its class counts), 0 before any training.
+
+        Notes
+        -----
+        Time: O(n_nodes + number of buffered chunks).
+        """
+        buffer = sum(a.nbytes for a in self._buffer_X) + sum(a.nbytes for a in self._buffer_y)
+        tree = _tree_bytes(self.root_) if hasattr(self, "root_") else 0
+
+        return {"buffer": int(buffer), "tree": int(tree)}
+
     def add_features(self, n_new: int) -> "DecisionTreeClassifier":
         """Accept ``n_new`` extra columns at the end of every later chunk.
 
@@ -763,6 +783,16 @@ def _tree_size(node: Node) -> tuple[int, int, int]:
     dr, lr, nr = _tree_size(node.right)
 
     return 1 + max(dl, dr), ll + lr, 1 + nl + nr
+
+
+def _tree_bytes(node: Node) -> int:
+    """Approximate bytes of the subtree rooted at ``node``: each node object plus its counts."""
+    size = sys.getsizeof(node) + node.value.nbytes
+
+    if not node.is_leaf:
+        size += _tree_bytes(node.left) + _tree_bytes(node.right)
+
+    return size
 
 
 def _check_X(X) -> np.ndarray:
