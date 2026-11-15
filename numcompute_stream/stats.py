@@ -532,9 +532,10 @@ class StreamingStats:
     -----
     Moments are merged with the Chan/Welford formula, so values far from zero
     keep their precision. Each feature's histogram starts on the range of its
-    first values; when data falls outside, the bin width doubles and
-    neighbouring bins merge, so no count is lost. Quantiles interpolate inside
-    a bin and are clipped to the exact min and max: error <= one bin width.
+    first values; when data falls outside, the bin width doubles, neighbouring
+    bins merge (no count is lost) and the new range extends on the side the
+    data overflowed. Quantiles follow ``np.quantile``'s default (linear)
+    definition, estimated inside the bins: error <= one bin width.
     Update: O(n * d) time. Memory: O(d * n_bins), or O(window * d * n_bins).
 
     Examples
@@ -742,7 +743,12 @@ class StreamingStats:
 
         Notes
         -----
-        Error is at most one bin width (see ``histogram``). Time: O(len(q) * d * n_bins).
+        Uses the same definition as ``np.quantile`` and ``np.median`` (linear):
+        position ``q * (n - 1)`` in the sorted values, interpolating between the
+        two values around it, so an even-count median averages the two middle
+        values. Each of those values is estimated inside its histogram bin, so
+        the error is at most one bin width (see ``histogram``); ``q=0`` and
+        ``q=1`` give the exact min and max. Time: O(len(q) * d * n_bins).
         """
         count, _, _, lo_val, hi_val, hist = self._check_data()
         q = np.asarray(q, dtype=float)
@@ -750,17 +756,12 @@ class StreamingStats:
         if q.size == 0 or np.any(q < 0) or np.any(q > 1):
             raise ValueError("q must lie in [0, 1]")
 
-        qs = np.atleast_1d(q)[:, None]                          # (m, 1)
-        cdf = np.cumsum(hist, axis=1)                           # (d, B)
-        target = qs * count                                     # (m, d)
-
-        # First bin whose cumulative count reaches the target, then interpolate inside it
-        j = np.minimum((cdf[None] < target[..., None]).sum(axis=-1), self.n_bins - 1)
-        before = np.where(j > 0, np.take_along_axis(cdf, np.maximum(j - 1, 0).T, axis=1).T, 0)
-        in_bin = np.take_along_axis(hist, j.T, axis=1).T
-        frac = np.divide(target - before, in_bin, out=np.zeros(target.shape), where=in_bin > 0)
-        values = np.clip(self._lo + (j + frac) * self._width, lo_val, hi_val)
-        values = np.where(count > 0, values, np.nan)
+        last = np.maximum(count - 1, 0)                         # (d,) rank of the largest value
+        position = np.atleast_1d(q)[:, None] * last             # (m, d), as np.quantile's linear method
+        below = np.floor(position)
+        low = self._order_statistic(below, count, lo_val, hi_val, hist)
+        high = self._order_statistic(np.minimum(below + 1, last), count, lo_val, hi_val, hist)
+        values = np.where(count > 0, low + (position - below) * (high - low), np.nan)
 
         return values[0] if q.ndim == 0 else values
 
@@ -782,6 +783,21 @@ class StreamingStats:
         hist = self._check_data()[5]
         edges = self._lo[:, None] + self._width[:, None] * np.arange(self.n_bins + 1)
         return hist.copy(), edges
+
+    def _order_statistic(self, rank, count, lo_val, hi_val, hist) -> np.ndarray:
+        """Estimate the value of each 0-based rank (m, d) from the histograms; exact for the min and max."""
+        cdf = np.cumsum(hist, axis=1)                           # (d, B)
+        target = rank + 0.5                                     # a bin's values are spread evenly across it
+
+        # The bin holding that rank, then the value's place inside the bin
+        j = np.minimum((cdf[None] < target[..., None]).sum(axis=-1), self.n_bins - 1)
+        before = np.where(j > 0, np.take_along_axis(cdf, np.maximum(j - 1, 0).T, axis=1).T, 0)
+        in_bin = np.take_along_axis(hist, j.T, axis=1).T
+        frac = np.divide(target - before, in_bin, out=np.full(target.shape, 0.5), where=in_bin > 0)
+        values = np.clip(self._lo + (j + frac) * self._width, lo_val, hi_val)
+        values = np.where(rank == 0, lo_val, values)
+
+        return np.where(rank >= count - 1, hi_val, values)
 
     def _check_data(self) -> tuple:
         """Return the state totals, or raise RuntimeError before any data."""
@@ -810,14 +826,26 @@ class StreamingStats:
             self._widen(f, np.fmin(x_min[f], self._lo[f]), np.fmax(x_max[f], hi[f]))
 
     def _widen(self, f: int, low: float, high: float) -> None:
-        """Double feature f's bin width until [low, high] fits, merging old bins."""
+        """Double feature f's bin width until [low, high] fits, merging old bins; new room goes where data overflowed."""
         B, lo, w = self.n_bins, self._lo[f], self._width[f]
-        t = np.ceil((lo - low) / w)                  # old-width bins added on the left
-        new_lo = lo - t * w
-        k = int(np.maximum(1, np.ceil(np.log2((high - new_lo) / (B * w)))))
+        hi = lo + B * w
+        t_min = int(np.ceil((lo - low) / w))         # fewest old-width bins to add on the left
+        k = int(np.maximum(1, np.ceil(np.log2((high - low) / (B * w)))))
 
-        while new_lo + B * w * 2.0 ** k < high:     # guard against rounding in log2
-            k += 1
+        while True:
+            t_max = int(np.floor((lo + B * w * 2.0 ** k - high) / w))   # most bins that fit on the left
+            if t_max >= t_min:
+                break
+            k += 1                                   # alignment or rounding needs one more doubling
+
+        # Spare room goes to the side that overflowed: left only, right only, or split between both
+        if low < lo and high <= hi:
+            t = t_max
+        elif low < lo:
+            t = (t_min + t_max) // 2
+        else:
+            t = t_min
+        new_lo = lo - t * w
 
         # Old bin i lies wholly inside new bin (t + i) // 2**k
         target = np.minimum(np.floor((t + np.arange(B)) / 2.0 ** k), B - 1).astype(np.int64)

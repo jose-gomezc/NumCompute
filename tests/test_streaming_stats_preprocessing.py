@@ -52,6 +52,13 @@ def test_histogram_widens_with_drift_and_quantiles_stay_within_one_bin():
     assert (error <= width).all()
     np.testing.assert_array_equal(stats.quantile([0.0, 1.0]), [np.nanmin(X, axis=0), np.nanmax(X, axis=0)])
 
+    rising, falling = StreamingStats(n_bins=64), StreamingStats(n_bins=64)
+    for i in range(6):                 # new room goes on the side the data overflowed
+        rising.update_stats(np.linspace(i, i + 1.0, 50)[:, None])
+        falling.update_stats(np.linspace(-i - 1.0, -i, 50)[:, None])
+    np.testing.assert_allclose(rising.histogram()[1][0, [0, -1]], [0.0, 8.0])
+    np.testing.assert_allclose(falling.histogram()[1][0, [0, -1]], [-8.0, 0.0])
+
 
 def test_window_keeps_only_the_last_chunks():
     chunks = _drifting_chunks()
@@ -143,6 +150,10 @@ def test_simple_imputer_partial_fit():
     edges = stats.histogram()[1]
     width = edges[:, 1] - edges[:, 0]
     assert (np.abs(median.statistics_ - np.nanmedian(X, axis=0)) <= width).all()
+
+    # Even count: the two middle values are averaged, as fit (np.median) does
+    small = SimpleImputer("median").partial_fit([[1.0], [2.0]]).partial_fit([[3.0], [np.nan], [4.0]])
+    np.testing.assert_allclose(small.statistics_, [2.5], atol=0.02)
 
     constant = SimpleImputer("constant", fill_value=0).partial_fit(chunks[0])
     np.testing.assert_array_equal(constant.statistics_, [0.0, 0.0, 0.0])
