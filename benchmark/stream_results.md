@@ -23,9 +23,9 @@ Median time per call over 7 repeats. Both versions run the same algorithm and ar
 
 ## buffer_size sweep
 
-`demo/data/stream.csv` (20,000 rows, concept drift at chunk 100) in chunks of 100, through SimpleImputer -> StandardScaler -> DecisionTreeClassifier(max_depth=5), evaluated test-then-train with StreamTrainer (each chunk is scored before the model learns from it). Retraining times are the median of 3 run(s); rows left in the buffer at the end are not flushed. Peak buffer is the largest buffer logged after a chunk.
+`demo/data/stream.csv` (20,000 rows, concept drift at chunk 100) in chunks of 100, through SimpleImputer -> StandardScaler -> DecisionTreeClassifier(max_depth=5), evaluated test-then-train with StreamTrainer (each chunk is scored before the model learns from it). Retraining times are the median of 3 run(s); rows left in the buffer at the end are not flushed. Buffer between retrains is the largest buffer logged after a chunk, once any retrain has cleared it; just before each retrain the buffer holds buffer_size rows (rounded up to whole chunks) at 48 bytes each, e.g. 23.4 kB for 500.
 
-| buffer_size | Retrains | Total retrain time | Mean retrain time | Final cumulative accuracy | Mean accuracy after drift | Peak buffer |
+| buffer_size | Retrains | Total retrain time | Mean retrain time | Final cumulative accuracy | Mean accuracy after drift | Buffer between retrains |
 |---:|---:|---:|---:|---:|---:|---:|
 | 100 | 200 | 396.3 ms | 1.98 ms | 0.808 | 0.797 | 0.0 kB |
 | 250 | 66 | 276.4 ms | 4.19 ms | 0.853 | 0.838 | 9.4 kB |

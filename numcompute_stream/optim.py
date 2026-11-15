@@ -1,7 +1,5 @@
 """Finite-difference gradients and Jacobians.
 
-Task allocation: Shuhao.
-
 Approximate derivatives by changing one input coordinate at a time.
 
 Forward: (f(x + h) - f(x)) / h.

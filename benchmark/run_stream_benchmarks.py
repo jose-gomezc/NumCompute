@@ -2,7 +2,7 @@
 
 Run from the repository root:
 
-    python -m benchmark.run_stream_benchmarks            # full sizes (about a minute)
+    python -m benchmark.run_stream_benchmarks            # full sizes (about 15 seconds)
     python -m benchmark.run_stream_benchmarks --quick    # small sizes, a few seconds
 
 Writes benchmark/stream_results.md and three PNG figures in benchmark/figures/.
@@ -119,7 +119,7 @@ def sweep(X, y, sizes, chunk, repeat, drift_chunk):
             "mean_ms": total_ms / n_retrains if n_retrains else np.nan,
             "final_accuracy": history["cumulative_accuracy"][-1],
             "after_drift": float(np.nanmean(history["accuracy"][drift_chunk:])),
-            "peak_kb": float(np.nanmax(history["buffer_bytes"])) / 1024,
+            "between_kb": float(np.nanmax(history["buffer_bytes"])) / 1024,     # logged after each chunk
         })
 
     return rows, histories
@@ -128,10 +128,10 @@ def sweep(X, y, sizes, chunk, repeat, drift_chunk):
 def sweep_table(rows) -> str:
     """Markdown table of the buffer_size sweep."""
     lines = ["| buffer_size | Retrains | Total retrain time | Mean retrain time | Final cumulative accuracy "
-             "| Mean accuracy after drift | Peak buffer |",
+             "| Mean accuracy after drift | Buffer between retrains |",
              "|---:|---:|---:|---:|---:|---:|---:|"]
     lines += [f"| {r['buffer_size']:,} | {r['retrains']} | {r['total_ms']:.1f} ms | {r['mean_ms']:.2f} ms "
-              f"| {r['final_accuracy']:.3f} | {r['after_drift']:.3f} | {r['peak_kb']:.1f} kB |" for r in rows]
+              f"| {r['final_accuracy']:.3f} | {r['after_drift']:.3f} | {r['between_kb']:.1f} kB |" for r in rows]
 
     return "\n".join(lines)
 
@@ -204,7 +204,9 @@ def run(quick: bool = False, output_dir: Path = Path(__file__).parent) -> str:
         f"{cfg['chunk']}, through SimpleImputer -> StandardScaler -> DecisionTreeClassifier(max_depth=5), "
         "evaluated test-then-train with StreamTrainer (each chunk is scored before the model learns from it). "
         f"Retraining times are the median of {cfg['sweep_repeat']} run(s); rows left in the buffer at the "
-        "end are not flushed. Peak buffer is the largest buffer logged after a chunk.",
+        "end are not flushed. Buffer between retrains is the largest buffer logged after a chunk, once "
+        "any retrain has cleared it; just before each retrain the buffer holds buffer_size rows (rounded "
+        "up to whole chunks) at 48 bytes each, e.g. 23.4 kB for 500.",
         "",
         sweep_table(sweep_rows),
         "",

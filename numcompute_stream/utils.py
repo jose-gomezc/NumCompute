@@ -49,7 +49,8 @@ def _as_numeric_array(values: ArrayLike) -> np.ndarray:
         raise TypeError("values must contain real numeric values")
     return array
 
-# ---- Jose: iterating line batches ----
+# ---- Line batches ----
+
 def iter_line_batches(items: Iterable, batch_size: int) -> Iterator[list]:
     """Yield consecutive batches of at most ``batch_size`` items.
 
@@ -99,7 +100,7 @@ def iter_line_batches(items: Iterable, batch_size: int) -> Iterator[list]:
         batch = list(islice(it, batch_size))
 
 
-# ---- Dat: validation and batching ----
+# ---- Validation and row batches ----
 
 def check_array(X, ndim: int = None) -> np.ndarray:
     """Convert input to a nonempty floating-point array and validate its dimensions.
@@ -187,7 +188,7 @@ def iter_batches(X: np.ndarray, batch_size: int):
         yield X[start:start + batch_size]
 
 
-# ---- Jose: numerically stable activations and distances ----
+# ---- Numerically stable activations and distances ----
 
 _EXP_FLOOR = -708.0             # exp() below this underflows past the smallest normal float
 _BLOCK_FLOATS = 1_000_000       # floats per block of differences in pairwise_distances (8 MB)

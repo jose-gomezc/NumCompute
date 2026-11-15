@@ -835,7 +835,7 @@ class StreamingStats:
             self._widen(f, np.fmin(x_min[f], self._lo[f]), np.fmax(x_max[f], hi[f]))
 
     def _widen(self, f: int, low: float, high: float) -> None:
-        """Double feature f's bin width until [low, high] fits, merging old bins; new room goes where data overflowed."""
+        """Double feature f's bin width until [low, high] fits; new room goes where the data overflowed."""
         B, lo, w = self.n_bins, self._lo[f], self._width[f]
         hi = lo + B * w
         t_min = int(np.ceil((lo - low) / w))         # fewest old-width bins to add on the left

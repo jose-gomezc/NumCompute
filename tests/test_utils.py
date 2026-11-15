@@ -39,7 +39,7 @@ def test_iter_batches_covers_all_rows_as_views():
         list(iter_batches(X, 0))
 
 
-# ---- Jose: iterating line batches ----
+# ---- Line batches ----
 
 def test_iter_line_batches_sizes_and_empty_input():
     """Full batches first, a shorter last one, nothing for an empty input."""
@@ -62,7 +62,7 @@ def test_iter_line_batches_rejects_bad_batch_size(batch_size, error):
         list(iter_line_batches(range(5), batch_size))
 
 
-# ---- Jose: numerically stable activations and distances ----
+# ---- Numerically stable activations and distances ----
 
 def test_logsumexp_matches_naive_formula_on_small_values():
     x = np.array([[0.5, -1.0, 2.0], [3.0, 0.0, -2.5]])

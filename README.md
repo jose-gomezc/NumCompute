@@ -31,7 +31,7 @@ NumCompute/
 │   ├── stream.py                   # new: StreamTrainer
 │   └── visualise.py                # new: plots
 ├── tests/
-│   ├── README.md
+│   ├── README.md                   # how to run the tests, layout and conventions
 │   ├── conftest.py                 # Agg backend, closes figures after each test
 │   └── test_*.py                   # 18 test files (see Tests)
 ├── benchmark/
@@ -84,7 +84,7 @@ Then open `demo/stream_demo.ipynb` and select the `.venv` interpreter as the ker
 
 The tables list the streaming APIs added in 2.2 and their key parameters, in the order of the assignment specification. Full signatures, validation rules and complexity notes are in the docstrings. `n` means samples, `d` input features and `k` classes unless otherwise stated. A chunk is a 2-D array of rows `(n, d)` with its labels `(n,)`. Run examples from the project root after installation.
 
-`io`, `sort_search`, `rank`, `optim`, `utils` and `benchmarking`, and the batch functions in `preprocessing`, `stats`, `metrics` and `pipeline`, are unchanged from 2.1 and documented in [docs/README_2.1.md](docs/README_2.1.md).
+`io`, `sort_search`, `rank`, `optim`, `utils` and `benchmarking`, and the batch functions in `preprocessing`, `stats`, `metrics` and `pipeline`, are unchanged from 2.1 and documented in [docs/README_2.1.md](docs/README_2.1.md). `sort_search`, `rank` and `optim` act on a whole array or function at once and keep no state between calls, so they have no `partial_fit` or `update`; streaming summaries come from `StreamingStats` and `RunningStats` in `stats`, and incremental reading from `io.iter_csv_chunks`.
 
 ### `numcompute_stream.stream`: training loop and logging
 
@@ -169,7 +169,7 @@ print(gini([0, 0, 1, 1]))                            # 0.5
 | --- | --- | --- | --- |
 | `StandardScaler().partial_fit(X)` | A numeric chunk `(n, d)`; NaN ignored | The same scaler (`self`) | Update the running mean and variance by merging each chunk's moments (Chan/Welford); `mean_`, `scale_` and `n_samples_seen_` reflect all chunks so far. |
 | `MinMaxScaler().partial_fit(X)` | A numeric chunk `(n, d)`; NaN ignored | The same scaler (`self`) | Update the running minimum and maximum of each column. |
-| `SimpleImputer().partial_fit(X)` | A chunk `(n, d)`; `strategy` and `fill_value` as in 2.1 | The same imputer (`self`) | Update the replacement values on the fly: exact running mean for `"mean"`, an estimate from a streaming histogram for `"median"`, the fixed value for `"constant"`. |
+| `SimpleImputer().partial_fit(X)` | A chunk `(n, d)`; `strategy` and `fill_value` as in 2.1 | The same imputer (`self`) | Update the replacement values on the fly: exact running mean for `"mean"`, an estimate from a streaming histogram for `"median"` (within one bin width, so far off after one extreme value), the fixed value for `"constant"`. |
 | `OneHotEncoder().partial_fit(X)` | A categorical chunk `(n, d)` | The same encoder (`self`) | Learn new categories; each new category gets a new column at the end of the output, so existing columns never move. |
 
 `fit`, `transform` and `fit_transform` behave as in 2.1; `fit` resets the state before learning. A chunk with the wrong number of features or with infinite values is rejected without changing the state, and empty chunks are ignored. With `StreamTrainer`, create the encoder with `OneHotEncoder(handle_unknown="ignore")`: test-then-train transforms each chunk before `partial_fit` sees it, so a new category is first scored as all zeros and then learnt.
@@ -196,7 +196,7 @@ print(encoder.transform(np.array([["A"], ["B"]])))   # [[0. 0. 1.] [1. 0. 0.]]
 | `StreamingStats()` | `n_bins=256` histogram bins per feature; `window=None` (keep only the last `window` chunks) | A new, empty summary | Summarise a stream feature by feature in bounded memory, over the whole stream or a sliding window. |
 | `stats.update_stats(X_chunk)` | A numeric chunk `(n, d)`; NaN skipped cell by cell; infinity rejected | The same object (`self`) | Add a chunk to the summary. |
 | `stats.mean()`, `stats.var(ddof=0)`, `stats.std(ddof=0)`, `stats.min()`, `stats.max()` | None, or `ddof` | Per-feature arrays `(d,)` | Exact moments and extremes, merged chunk by chunk with the Chan/Welford formula. |
-| `stats.quantile(q)` | Probability or 1-D array of probabilities in [0, 1] | `(d,)` for one `q`, `(len(q), d)` for several | Quantiles with the same definition as `np.quantile` and `np.median`, estimated from an adaptive histogram: within one bin width, exact at the min and max. |
+| `stats.quantile(q)` | Probability or 1-D array of probabilities in [0, 1] | `(d,)` for one `q`, `(len(q), d)` for several | Quantiles with the same definition as `np.quantile` and `np.median`, estimated from an adaptive histogram: within one bin width, exact at the min and max. One extreme value widens every bin, so a quantile can then be far from the exact one. |
 | `stats.histogram()` | None | `(counts, edges)`, shapes `(d, n_bins)` and `(d, n_bins + 1)` | The histogram of each feature; its range widens on the side where values fall outside it, without losing counts. |
 | `stats.reset()` | None | The same object (`self`) | Clear everything. |
 
@@ -322,7 +322,7 @@ Environment: Python 3.14.7, NumPy 2.5.4, OS `Windows-11-10.0.26200-SP0`, CPU `In
 
 Timings and speedups can differ between machines because hardware, software and system load vary, while the overall performance trend can remain consistent. The 2.1 performance table is in [docs/README_2.1.md](docs/README_2.1.md).
 
-| Operation | NumCompute-Stream result | Baseline/result | Notes |
+| Operation | NumCompute result | Baseline/result | Notes |
 | --- | ---: | ---: | --- |
 | tree root split (max_depth=1) n=5,000 d=5 | 11.377 ms | 36.694 ms (3.2x) | Sort once per feature, then sweep thresholds with running counts: Python lists vs cumsum |
 | tree fit max_depth=5 n=5,000 d=5 | 38.637 ms | 158.445 ms (4.1x) | Same tree (export_text checked); only the split search differs |
@@ -331,7 +331,7 @@ Timings and speedups can differ between machines because hardware, software and 
 
 The same run sweeps `buffer_size`: `stream.csv` in chunks of 100 through SimpleImputer → StandardScaler → DecisionTreeClassifier(max_depth=5), evaluated test-then-train with `StreamTrainer`, with a concept drift at chunk 100. Retraining times are the median of 3 runs.
 
-| buffer_size | Retrains | Total retrain time | Mean retrain time | Final cumulative accuracy | Mean accuracy after drift | Peak buffer |
+| buffer_size | Retrains | Total retrain time | Mean retrain time | Final cumulative accuracy | Mean accuracy after drift | Buffer between retrains |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 100 | 200 | 396.3 ms | 1.98 ms | 0.808 | 0.797 | 0.0 kB |
 | 250 | 66 | 276.4 ms | 4.19 ms | 0.853 | 0.838 | 9.4 kB |
@@ -341,6 +341,8 @@ The same run sweeps `buffer_size`: `stream.csv` in chunks of 100 through SimpleI
 | 5,000 | 4 | 143.0 ms | 35.76 ms | 0.781 | 0.710 | 229.7 kB |
 
 Small buffers retrain often on little data and give noisy trees; large buffers keep the old rule for longer after the drift. Accuracy after the drift peaks at 500 to 1,000 rows, while total retraining time falls as the buffer grows.
+
+"Buffer between retrains" is the largest buffer logged after a chunk, once any retrain has cleared it (so 0 kB when every chunk triggers a retrain). Just before each retrain the buffer holds `buffer_size` rows, rounded up to whole chunks, at 48 bytes per row (5 features and the label): 23.4 kB for 500 and 234.4 kB for 5,000. Memory is therefore bounded by `buffer_size`, however long the stream is.
 
 ![Rolling accuracy by buffer size](benchmark/figures/rolling_accuracy.png)
 
@@ -429,3 +431,4 @@ The 2.1 review left three numerical issues open (the first three rows); the four
 ### Notes
 
 - The 2.1 package used `init.py` because the 2.1 guide named it that way (most likely a typo); this version uses a proper `__init__.py`.
+- The 2.1 base (`io`, `preprocessing`, `sort_search`, `rank`, `stats`, `metrics`, `optim`, `pipeline`, `utils`, `benchmarking`) was group work; each member's modules are listed in [docs/README_2.1.md](docs/README_2.1.md). The 2.2 streaming extension is individual work.
