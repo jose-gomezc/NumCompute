@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`numcompute.benchmarking` and the benchmark/ runner.
+"""Unit tests for :mod:`numcompute_stream.benchmarking` and the benchmark/ runner.
 
 Timings depend on the machine, so no test asserts how fast anything is: they
 check shapes, call counts, the result check, validation and the report format.
@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from numcompute.benchmarking import compare, environment_info, format_table, time_function
+from numcompute_stream.benchmarking import compare, environment_info, format_table, time_function
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 

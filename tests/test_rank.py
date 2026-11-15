@@ -3,7 +3,7 @@ from typing import cast
 
 import numpy as np
 
-from numcompute.rank import (
+from numcompute_stream.rank import (
     PercentileRankKind,
     RankMethod,
     percentile,

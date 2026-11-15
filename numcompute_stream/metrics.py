@@ -3,11 +3,18 @@
 Classification metrics take 1-D label arrays (int, float, bool or str labels).
 Precision, recall and F1 are all computed from one confusion matrix, so they
 share the same counts. Scalar results are returned as Python floats.
+
+The ``Streaming*`` classes accumulate the same metrics over chunks with
+``update`` / ``result`` / ``reset``, either over the whole stream or over a
+rolling window of the most recent chunks.
 """
 
+from collections import deque
 from collections.abc import Sequence
 
 import numpy as np
+
+from .utils import _check_int
 
 # All that can be imported from this module
 __all__ = [
@@ -19,6 +26,12 @@ __all__ = [
     "mse",
     "roc_curve",
     "auc",
+    "StreamingConfusionMatrix",
+    "StreamingAccuracy",
+    "StreamingPrecision",
+    "StreamingRecall",
+    "StreamingF1",
+    "StreamingAUC",
 ]
 
 # Possible values for average
@@ -500,6 +513,516 @@ def auc(
     return float(direction * area)
 
 
+# ---------------------------------------------------------------------------
+# Streaming metrics
+# ---------------------------------------------------------------------------
+
+class _StreamingConfusion:
+    """Base class: accumulates a confusion matrix over chunks, optionally over a window."""
+
+    def __init__(self, labels=None, window: int | None = None):
+        if labels is not None:
+            labels = _check_labels(labels, "labels")
+
+            if np.unique(labels).size != labels.size:
+                raise ValueError(f"labels has duplicates: {labels.tolist()}")
+
+        if window is not None:
+            _check_int(window, "window", minimum=1)
+
+        self.labels = labels
+        self.window = window
+        self.reset()
+
+    def reset(self):
+        """Forget every chunk seen so far.
+
+        Returns
+        -------
+        self
+            The emptied metric.
+        """
+        self.labels_ = self.labels
+        self.n_seen_ = 0
+        self._chunks = deque()
+
+        if self.labels is None:
+            self._total = None
+        else:
+            self._total = np.zeros((self.labels.size, self.labels.size), dtype=np.int64)
+
+        return self
+
+    def update(self, y_true, y_pred):
+        """Add one chunk of true and predicted labels.
+
+        Parameters
+        ----------
+        y_true : array_like, shape (n,)
+            True labels of the chunk (int, float, bool or str).
+        y_pred : array_like, shape (n,)
+            Predicted labels, same kind as ``y_true``.
+
+        Returns
+        -------
+        self
+            The updated metric.
+
+        Raises
+        ------
+        TypeError
+            If the labels have unsupported or incompatible types, including a
+            change of type during the stream.
+        ValueError
+            If the inputs are not 1-D, have different lengths or contain NaN,
+            or hold a label missing from a fixed ``labels``.
+
+        Notes
+        -----
+        An empty chunk is ignored; a rejected chunk leaves the state unchanged.
+        Time: O(n log k + k**2) per chunk. Memory: O(k**2), or O(window * k**2).
+        """
+        if np.size(y_true) == 0 and np.size(y_pred) == 0:
+            return self
+
+        y_true = _check_labels(y_true, "y_true")
+        y_pred = _check_labels(y_pred, "y_pred")
+        _check_same_length(y_true, y_pred, ("y_true", "y_pred"))
+        _check_same_family(y_true, y_pred, ("y_true", "y_pred"))
+
+        if self.labels_ is not None:
+            _check_same_family(self.labels_, y_true, ("earlier labels", "y_true"))
+
+        if self.labels is not None:
+            _resolve_labels(y_true, y_pred, self.labels)       # raises on an unknown label
+
+        # All checks passed: only now change the state
+        if self.labels is None:
+            self._grow_labels(np.unique(np.concatenate([y_true, y_pred])))
+
+        cm = _confusion(y_true, y_pred, self.labels_)
+        self._total = self._total + cm
+        self.n_seen_ += y_true.size
+
+        if self.window is not None:
+            self._chunks.append((cm, y_true.size))
+
+            if len(self._chunks) > self.window:                # drop the oldest chunk
+                old_cm, old_n = self._chunks.popleft()
+                self._total = self._total - old_cm
+                self.n_seen_ -= old_n
+
+        return self
+
+    def _grow_labels(self, found: np.ndarray) -> None:
+        """Add new labels, moving the stored counts to their new positions."""
+        if self.labels_ is None:
+            self.labels_ = found
+            self._total = np.zeros((found.size, found.size), dtype=np.int64)
+            return
+
+        new = np.union1d(self.labels_, found)
+
+        if new.size == self.labels_.size:
+            return
+
+        self._total = _expand_confusion(self._total, self.labels_, new)
+        self._chunks = deque((_expand_confusion(cm, self.labels_, new), n) for cm, n in self._chunks)
+        self.labels_ = new
+
+
+class StreamingConfusionMatrix(_StreamingConfusion):
+    """Confusion matrix accumulated over chunks.
+
+    Parameters
+    ----------
+    labels : array_like, shape (k,), optional
+        Fixed label order for the rows and columns; a label outside it raises.
+        Default: the sorted labels seen so far, growing as new ones arrive.
+    window : int or None, default None
+        Count only the most recent ``window`` chunks; None counts the whole stream.
+
+    Attributes
+    ----------
+    labels_ : ndarray, shape (k,), or None
+        Row and column labels; None before any data.
+    n_seen_ : int
+        Samples counted (inside the window, if any).
+
+    Raises
+    ------
+    TypeError
+        If ``labels`` has an unsupported dtype or ``window`` is not an integer.
+    ValueError
+        If ``labels`` is empty or has duplicates, or ``window`` < 1.
+
+    Examples
+    --------
+    >>> cm = StreamingConfusionMatrix()
+    >>> cm.update([0, 1], [0, 0]).update([1, 1], [1, 1]).result()
+    array([[1, 0],
+           [1, 2]])
+    """
+
+    def result(self) -> np.ndarray:
+        """Current confusion matrix.
+
+        Returns
+        -------
+        ndarray of int, shape (k, k)
+            Rows are true labels and columns predicted labels, in ``labels_``
+            order; shape (0, 0) before any data.
+        """
+        return np.zeros((0, 0), dtype=np.int64) if self._total is None else self._total.copy()
+
+
+class StreamingAccuracy(_StreamingConfusion):
+    """Accuracy accumulated over chunks.
+
+    Parameters
+    ----------
+    window : int or None, default None
+        Score only the most recent ``window`` chunks; None scores the whole stream.
+
+    Attributes
+    ----------
+    labels_ : ndarray or None
+        Labels seen so far.
+    n_seen_ : int
+        Samples counted (inside the window, if any).
+
+    Raises
+    ------
+    TypeError
+        If ``window`` is not an integer.
+    ValueError
+        If ``window`` < 1.
+
+    Examples
+    --------
+    >>> acc = StreamingAccuracy()
+    >>> acc.update([0, 1], [0, 0]).update([1, 1], [1, 1]).result()
+    0.75
+    """
+
+    def __init__(self, window: int | None = None):
+        super().__init__(window=window)
+
+    def result(self) -> float:
+        """Fraction of correct predictions so far.
+
+        Returns
+        -------
+        float
+            Value in [0, 1]; NaN before any data.
+        """
+        if self.n_seen_ == 0:
+            return float("nan")
+
+        return float(np.trace(self._total) / self.n_seen_)
+
+
+class _StreamingPRF(_StreamingConfusion):
+    """Base class for streaming precision, recall and F1 (one of the three scores)."""
+
+    _score = 0     # index into (precision, recall, f1)
+
+    def __init__(self, average: str | None = "binary", pos_label=1,
+                 zero_division: float = 0.0, window: int | None = None):
+        self.zero_division = _check_prf_options(average, zero_division)
+        self.average = average
+        self.pos_label = pos_label
+        super().__init__(window=window)
+
+    def result(self):
+        """Current score.
+
+        Returns
+        -------
+        float or ndarray of shape (k,)
+            One value, or one per label with counts in the current window
+            when ``average=None``; NaN before any data.
+
+        Raises
+        ------
+        TypeError
+            If ``pos_label`` is not the same kind of label as the data.
+        ValueError
+            If ``average="binary"`` and more than 2 labels were seen, or
+            ``pos_label`` is not one of the 2 labels.
+        """
+        if self.n_seen_ == 0:
+            return float("nan")
+
+        # Only labels with counts now: one seen only in chunks that left the window is not a class
+        present = (self._total.sum(axis=0) + self._total.sum(axis=1)) > 0
+        cm = self._total[np.ix_(present, present)]
+
+        scores = _prf_from_confusion(cm, self.labels_[present], self.average,
+                                     self.pos_label, self.zero_division)
+
+        return scores[self._score]
+
+
+class StreamingPrecision(_StreamingPRF):
+    """Precision accumulated over chunks: ``tp / (tp + fp)``.
+
+    Parameters
+    ----------
+    average : {"binary", "macro", "micro", "weighted", None}, default "binary"
+        How per-label scores are combined, as in :func:`precision`.
+    pos_label : int, float, bool or str, default 1
+        Positive label when ``average="binary"``.
+    zero_division : float, default 0.0
+        Value used when a denominator is zero.
+    window : int or None, default None
+        Score only the most recent ``window`` chunks; None scores the whole stream.
+
+    Attributes
+    ----------
+    labels_ : ndarray or None
+        Labels seen so far.
+    n_seen_ : int
+        Samples counted (inside the window, if any).
+
+    Raises
+    ------
+    TypeError
+        If ``zero_division`` is not a number or ``window`` is not an integer.
+    ValueError
+        If ``average`` is unknown, ``zero_division`` is NaN or ``window`` < 1.
+    """
+
+    _score = 0
+
+
+class StreamingRecall(_StreamingPRF):
+    """Recall accumulated over chunks: ``tp / (tp + fn)``.
+
+    Parameters
+    ----------
+    average : {"binary", "macro", "micro", "weighted", None}, default "binary"
+        How per-label scores are combined, as in :func:`recall`.
+    pos_label : int, float, bool or str, default 1
+        Positive label when ``average="binary"``.
+    zero_division : float, default 0.0
+        Value used when a denominator is zero.
+    window : int or None, default None
+        Score only the most recent ``window`` chunks; None scores the whole stream.
+
+    Attributes
+    ----------
+    labels_ : ndarray or None
+        Labels seen so far.
+    n_seen_ : int
+        Samples counted (inside the window, if any).
+
+    Raises
+    ------
+    TypeError
+        If ``zero_division`` is not a number or ``window`` is not an integer.
+    ValueError
+        If ``average`` is unknown, ``zero_division`` is NaN or ``window`` < 1.
+    """
+
+    _score = 1
+
+
+class StreamingF1(_StreamingPRF):
+    """F1 score accumulated over chunks: ``2 tp / (2 tp + fp + fn)``.
+
+    Parameters
+    ----------
+    average : {"binary", "macro", "micro", "weighted", None}, default "binary"
+        How per-label scores are combined, as in :func:`f1`.
+    pos_label : int, float, bool or str, default 1
+        Positive label when ``average="binary"``.
+    zero_division : float, default 0.0
+        Value used when a denominator is zero.
+    window : int or None, default None
+        Score only the most recent ``window`` chunks; None scores the whole stream.
+
+    Attributes
+    ----------
+    labels_ : ndarray or None
+        Labels seen so far.
+    n_seen_ : int
+        Samples counted (inside the window, if any).
+
+    Raises
+    ------
+    TypeError
+        If ``zero_division`` is not a number or ``window`` is not an integer.
+    ValueError
+        If ``average`` is unknown, ``zero_division`` is NaN or ``window`` < 1.
+    """
+
+    _score = 2
+
+
+class StreamingAUC:
+    """Binary ROC AUC accumulated over chunks, from score histograms.
+
+    Parameters
+    ----------
+    pos_label : int, float, bool or str, default 1
+        Label of the positive class.
+    n_bins : int, default 1000
+        Number of equal-width score bins on [0, 1].
+    window : int or None, default None
+        Score only the most recent ``window`` chunks; None scores the whole stream.
+
+    Attributes
+    ----------
+    labels_ : ndarray or None
+        Labels seen so far (at most 2).
+    n_seen_ : int
+        Samples counted (inside the window, if any).
+
+    Raises
+    ------
+    TypeError
+        If ``pos_label`` is not a single supported label, or ``n_bins`` or
+        ``window`` is not an integer.
+    ValueError
+        If ``n_bins`` or ``window`` < 1.
+
+    Notes
+    -----
+    Positives and negatives are counted per score bin, so memory is
+    O(n_bins) however long the stream. Scores in the same bin are treated as
+    tied (half credit), so the result equals the exact AUC whenever no two
+    distinct scores share a bin. Update: O(n + n_bins); result: O(n_bins).
+
+    Examples
+    --------
+    >>> roc = StreamingAUC()
+    >>> roc.update([0, 1], [0.2, 0.9]).update([0, 1], [0.6, 0.4]).result()
+    0.75
+    """
+
+    def __init__(self, pos_label=1, n_bins: int = 1000, window: int | None = None):
+        if np.ndim(pos_label) != 0:
+            raise TypeError(f"pos_label must be a single label, got {pos_label!r}")
+
+        _check_int(n_bins, "n_bins", minimum=1)
+
+        if window is not None:
+            _check_int(window, "window", minimum=1)
+
+        self._pos_label = _check_labels([pos_label], "pos_label")
+        self.pos_label = pos_label
+        self.n_bins = n_bins
+        self.window = window
+        self.reset()
+
+    def reset(self) -> "StreamingAUC":
+        """Forget every chunk seen so far.
+
+        Returns
+        -------
+        StreamingAUC
+            The emptied metric.
+        """
+        self.labels_ = None
+        self.n_seen_ = 0
+        self._pos = np.zeros(self.n_bins, dtype=np.int64)
+        self._neg = np.zeros(self.n_bins, dtype=np.int64)
+        self._chunks = deque()
+
+        return self
+
+    def update(self, y_true, y_score) -> "StreamingAUC":
+        """Add one chunk of true labels and positive-class scores.
+
+        Parameters
+        ----------
+        y_true : array_like, shape (n,)
+            True labels of the chunk; at most 2 distinct labels over the stream.
+        y_score : array_like of float, shape (n,)
+            Scores in [0, 1] for the positive class, e.g. ``predict_proba(X)[:, 1]``.
+
+        Returns
+        -------
+        StreamingAUC
+            The updated metric.
+
+        Raises
+        ------
+        TypeError
+            If the labels have an unsupported type or a different type than
+            ``pos_label``, or ``y_score`` is not numeric.
+        ValueError
+            If the inputs are not 1-D, have different lengths or contain NaN,
+            a score is outside [0, 1], more than 2 labels are seen, or 2
+            labels are seen and neither is ``pos_label``.
+
+        Notes
+        -----
+        An empty chunk is ignored; a rejected chunk leaves the state unchanged.
+        Time: O(n + n_bins).
+        """
+        if np.size(y_true) == 0 and np.size(y_score) == 0:
+            return self
+
+        y_true = _check_labels(y_true, "y_true")
+        y_score = _check_values(y_score, "y_score")
+        _check_same_length(y_true, y_score, ("y_true", "y_score"))
+        _check_same_family(y_true, self._pos_label, ("y_true", "pos_label"))
+
+        if (y_score < 0).any() or (y_score > 1).any():
+            raise ValueError("y_score must be in [0, 1], e.g. probabilities from predict_proba")
+
+        labels = np.unique(y_true) if self.labels_ is None else np.union1d(self.labels_, y_true)
+
+        if labels.size > 2:
+            raise ValueError(f"StreamingAUC is for binary labels, got {labels.tolist()}")
+        if labels.size == 2 and not np.isin(self._pos_label, labels).all():
+            raise ValueError(f"pos_label {self.pos_label!r} is not one of the labels {labels.tolist()}")
+
+        # All checks passed: only now change the state
+        self.labels_ = labels
+        positive = y_true == self._pos_label[0]
+        bins = np.minimum((y_score * self.n_bins).astype(np.int64), self.n_bins - 1)
+        pos = np.bincount(bins[positive], minlength=self.n_bins)
+        neg = np.bincount(bins[~positive], minlength=self.n_bins)
+
+        self._pos = self._pos + pos
+        self._neg = self._neg + neg
+        self.n_seen_ += y_true.size
+
+        if self.window is not None:
+            self._chunks.append((pos, neg))
+
+            if len(self._chunks) > self.window:                # drop the oldest chunk
+                old_pos, old_neg = self._chunks.popleft()
+                self._pos = self._pos - old_pos
+                self._neg = self._neg - old_neg
+                self.n_seen_ -= int(old_pos.sum() + old_neg.sum())
+
+        return self
+
+    def result(self) -> float:
+        """Current area under the ROC curve.
+
+        Returns
+        -------
+        float
+            Value in [0, 1]; NaN until both a positive and a negative sample
+            have been seen.
+        """
+        n_pos, n_neg = self._pos.sum(), self._neg.sum()
+
+        if n_pos == 0 or n_neg == 0:
+            return float("nan")
+
+        # Highest-score bins first: each bin is one threshold of the ROC curve
+        tpr = np.r_[0.0, np.cumsum(self._pos[::-1]) / n_pos]
+        fpr = np.r_[0.0, np.cumsum(self._neg[::-1]) / n_neg]
+
+        return auc(fpr, tpr)
+
+
 def _check_labels(
     y: np.ndarray | Sequence[int | str | float],
     name: str,
@@ -851,6 +1374,15 @@ def _confusion(
     return counts.reshape(k, k)
 
 
+def _expand_confusion(cm: np.ndarray, classes: np.ndarray, new_classes: np.ndarray) -> np.ndarray:
+    """Copy ``cm`` (rows/columns in ``classes``) into a zero matrix ordered by ``new_classes``."""
+    idx = _label_index(classes, new_classes)
+    out = np.zeros((new_classes.size, new_classes.size), dtype=cm.dtype)
+    out[np.ix_(idx, idx)] = cm
+
+    return out
+
+
 def _safe_divide(
     num: np.ndarray | Sequence[int | float],
     den: np.ndarray | Sequence[int | float],
@@ -927,6 +1459,22 @@ def _precision_recall_f1(
     -----
     Time: O(n * log(n) + n * log(k) + k**2); space O(n + k**2).
     """
+    zero_division = _check_prf_options(average, zero_division)
+
+    y_true = _check_labels(y_true, "y_true")
+    y_pred = _check_labels(y_pred, "y_pred")
+    _check_same_length(y_true, y_pred, ("y_true", "y_pred"))
+    _check_same_family(y_true, y_pred, ("y_true", "y_pred"))
+
+    classes = _resolve_labels(y_true, y_pred, None)
+
+    return _prf_from_confusion(
+        _confusion(y_true, y_pred, classes), classes, average, pos_label, zero_division
+    )
+
+
+def _check_prf_options(average: str | None, zero_division) -> float:
+    """Validate ``average`` and ``zero_division``; return ``zero_division`` as a float."""
     if average not in _AVERAGES:
         raise ValueError(f"average must be one of {_AVERAGES}, got {average!r}")
 
@@ -940,13 +1488,17 @@ def _precision_recall_f1(
     if np.isnan(zero_division):
         raise ValueError("zero_division must not be NaN")
 
-    y_true = _check_labels(y_true, "y_true")
-    y_pred = _check_labels(y_pred, "y_pred")
-    _check_same_length(y_true, y_pred, ("y_true", "y_pred"))
-    _check_same_family(y_true, y_pred, ("y_true", "y_pred"))
+    return zero_division
 
-    classes = _resolve_labels(y_true, y_pred, None)
 
+def _prf_from_confusion(
+    cm: np.ndarray,
+    classes: np.ndarray,
+    average: str | None,
+    pos_label: int | float | str,
+    zero_division: float,
+) -> tuple:
+    """Precision, recall and F1 from a confusion matrix whose rows and columns follow ``classes``."""
     if average == "binary":
         if classes.size > 2:
             raise ValueError(
@@ -954,19 +1506,18 @@ def _precision_recall_f1(
                 f"{classes.tolist()}; use 'macro', 'micro' or 'weighted'"
             )
 
-        found = classes
+        pos = _check_pos_label(pos_label, classes)
 
-        pos = _check_pos_label(pos_label, y_true)
+        # pos_label may be absent from the data (e.g. every label is 0): add it with zero counts
+        if _label_index(pos, classes)[0] < 0:
+            if classes.size == 2:
+                raise ValueError(
+                    f"pos_label {pos_label!r} is not one of the labels {classes.tolist()}"
+                )
 
-        # pos_label may be absent from the data (e.g. every label is 0): add it so its counts are 0
-        classes = np.union1d(found, pos)
-
-        if classes.size > 2:
-            raise ValueError(
-                f"pos_label {pos_label!r} is not one of the labels {found.tolist()}"
-            )
-
-    cm = _confusion(y_true, y_pred, classes)
+            new_classes = np.union1d(classes, pos)
+            cm = _expand_confusion(cm, classes, new_classes)
+            classes = new_classes
 
     tp = np.diag(cm)
     fp = cm.sum(axis=0) - tp  # predicted as the class, truly another

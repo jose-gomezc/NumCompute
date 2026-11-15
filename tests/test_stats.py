@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from numcompute import stats
-from numcompute.utils import iter_batches
+from numcompute_stream import stats
+from numcompute_stream.utils import iter_batches
 
 
 @pytest.fixture

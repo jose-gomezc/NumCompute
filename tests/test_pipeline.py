@@ -3,8 +3,8 @@
 import numpy as np
 import pytest
 
-from numcompute.pipeline import Pipeline
-from numcompute.preprocessing import SimpleImputer, StandardScaler, OneHotEncoder
+from numcompute_stream.pipeline import Pipeline
+from numcompute_stream.preprocessing import SimpleImputer, StandardScaler, OneHotEncoder
 
 
 @pytest.fixture

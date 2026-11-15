@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from numcompute.sort_search import (
+from numcompute_stream.sort_search import (
     binary_search,
     lexsort,
     quickselect,

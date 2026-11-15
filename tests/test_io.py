@@ -1,9 +1,9 @@
-"""Unit tests for :mod:`numcompute.io`: header reading, CSV loading and chunked streaming."""
+"""Unit tests for :mod:`numcompute_stream.io`: header reading, CSV loading and chunked streaming."""
 
 import numpy as np
 import pytest
 
-from numcompute.io import DEFAULT_MISSING, iter_csv_chunks, load_csv, read_header
+from numcompute_stream.io import DEFAULT_MISSING, iter_csv_chunks, load_csv, read_header
 
 # Seven data rows with missing cells spread over several chunks
 GAPPY_CSV = (
@@ -165,7 +165,7 @@ def test_load_csv_fast_and_general_paths_agree(write_csv, monkeypatch, dtype):
 
     fast = load_csv(path, dtype=dtype)
 
-    monkeypatch.setattr("numcompute.io._read_fast", lambda *args, **kwargs: None)  # force np.genfromtxt
+    monkeypatch.setattr("numcompute_stream.io._read_fast", lambda *args, **kwargs: None)  # force np.genfromtxt
     general = load_csv(path, dtype=dtype)
 
     assert fast.dtype.kind == general.dtype.kind

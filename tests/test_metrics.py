@@ -1,9 +1,9 @@
-"""Unit tests for :mod:`numcompute.metrics`: classification, regression and ROC metrics."""
+"""Unit tests for :mod:`numcompute_stream.metrics`: classification, regression and ROC metrics."""
 
 import numpy as np
 import pytest
 
-from numcompute.metrics import accuracy, auc, confusion_matrix, f1, mse, precision, recall, roc_curve
+from numcompute_stream.metrics import accuracy, auc, confusion_matrix, f1, mse, precision, recall, roc_curve
 
 # Binary example: tp=2, fp=1, fn=1, tn=1 for the positive class 1
 BIN_TRUE = [0, 1, 1, 0, 1]

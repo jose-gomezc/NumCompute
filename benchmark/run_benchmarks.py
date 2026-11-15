@@ -17,8 +17,8 @@ from pathlib import Path
 import numpy as np
 
 from benchmark import loops
-from numcompute import io, metrics, preprocessing, rank, sort_search, stats
-from numcompute.benchmarking import compare, environment_info, format_table
+from numcompute_stream import io, metrics, preprocessing, rank, sort_search, stats
+from numcompute_stream.benchmarking import compare, environment_info, format_table
 
 SEED = 42
 DEFAULT_OUTPUT = Path(__file__).with_name("results.md")
@@ -54,13 +54,13 @@ def build_cases(cfg, rng, tmp_dir):
 
     csv_path = Path(tmp_dir) / "bench.csv"
     _write_csv(csv_path, rng, cfg["csv_shape"])
-    
+
     X = rng.normal(5, 2, size=cfg["scale_shape"])
     X_list = X.tolist()
-    
+
     x = rng.normal(size=n)
     x_list = x.tolist()
-    
+
     bins, k = cfg["bins"], cfg["k"]
     ties = rng.integers(0, n_rank // 4, n_rank)          # many repeated values
     ties_list = ties.tolist()
@@ -142,10 +142,10 @@ def run(quick=False):
         "## Environment",
         "",
     ]
-    
+
     lines += [f"- {key}: {value}" for key, value in environment_info().items()]
     lines += ["", "## Results", "", format_table(rows)]
-    
+
     return "\n".join(lines) + "\n"
 
 

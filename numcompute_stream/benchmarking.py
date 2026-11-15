@@ -88,7 +88,7 @@ def time_function(
         for _ in range(number):
             func()
         times[r] = (time.perf_counter() - start) / number   # seconds per call
-    
+
     return times
 
 
@@ -155,9 +155,9 @@ def compare(
     # The check step above already warmed both functions up
     loop_s = float(np.median(time_function(loop_func, repeat, number, warmup=0)))
     vec_s = float(np.median(time_function(vec_func, repeat, number, warmup=0)))
-    
+
     speedup = loop_s / vec_s if vec_s > 0 else float("inf")
-    
+
     return {"case": case, "loop_s": loop_s, "vec_s": vec_s, "speedup": speedup}
 
 
@@ -223,7 +223,7 @@ def format_table(rows: Sequence[dict[str, str | float]]) -> str:
         lines.append(f"| {row['case']} | {row['vec_s'] * 1e3:,.3f} ms "
                      f"| {row['loop_s'] * 1e3:,.3f} ms ({row['speedup']:,.1f}x) "
                      f"| {row.get('notes', '')} |")
-    
+
     return "\n".join(lines)
 
 
@@ -260,10 +260,10 @@ def _same_result(a: Any, b: Any, rtol: float, atol: float) -> bool:
     # Shapes must match
     if a.shape != b.shape:
         return False
-    
+
     # Numbers may differ by rounding (loop and NumPy add in a different order)
     if a.dtype.kind in "biuf" and b.dtype.kind in "biuf":
         return bool(np.allclose(a, b, rtol=rtol, atol=atol, equal_nan=True))
-    
+
     # Text must match exactly
     return bool(np.array_equal(a, b))

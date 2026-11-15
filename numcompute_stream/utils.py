@@ -1,7 +1,6 @@
-"""Shared helpers. Each member owns the functions in their own block."""
+"""Shared helpers: input checks, batching, stable activations and distances."""
 from collections.abc import Iterable, Iterator
 from itertools import islice
-from typing import Any
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -50,7 +49,8 @@ def _as_numeric_array(values: ArrayLike) -> np.ndarray:
         raise TypeError("values must contain real numeric values")
     return array
 
-# ---- Jose: iterating line batches ----
+# ---- Line batches ----
+
 def iter_line_batches(items: Iterable, batch_size: int) -> Iterator[list]:
     """Yield consecutive batches of at most ``batch_size`` items.
 
@@ -100,7 +100,7 @@ def iter_line_batches(items: Iterable, batch_size: int) -> Iterator[list]:
         batch = list(islice(it, batch_size))
 
 
-# ---- Dat: validation and batching ----
+# ---- Validation and row batches ----
 
 def check_array(X, ndim: int = None) -> np.ndarray:
     """Convert input to a nonempty floating-point array and validate its dimensions.
@@ -138,6 +138,15 @@ def check_array(X, ndim: int = None) -> np.ndarray:
     if ndim is not None and X.ndim != ndim:
         raise ValueError(f"X must be {ndim}-D, got shape {X.shape}; use X.reshape(-1, 1) for one feature")
     return X
+
+
+def _check_int(value, name: str, minimum: int) -> None:
+    """Raise if ``value`` is not an integer >= ``minimum`` (bool rejected)."""
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{name} must be an integer, got {value!r}")
+
+    if value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}, got {value}")
 
 
 def iter_batches(X: np.ndarray, batch_size: int):
@@ -179,38 +188,38 @@ def iter_batches(X: np.ndarray, batch_size: int):
         yield X[start:start + batch_size]
 
 
-# ---- Jose: numerically stable activations and distances ----
+# ---- Numerically stable activations and distances ----
 
-def _safe_max(x: np.ndarray, axis) -> np.ndarray:
-    """Per-slice maximum used as a shift, replaced by 0 where it is not finite.
+_EXP_FLOOR = -708.0             # exp() below this underflows past the smallest normal float
+_BLOCK_FLOATS = 1_000_000       # floats per block of differences in pairwise_distances (8 MB)
 
-    Parameters
-    ----------
-    x : ndarray of float
-        Input values.
-    axis : int or None
-        Axis of the maximum; the result keeps it with length 1.
 
-    Returns
-    -------
-    ndarray of float
-        Shift that broadcasts against x. A slice that is all -inf, contains
-        +inf or contains NaN gets 0, so subtracting it never creates inf - inf.
+def _exp_floored(z: np.ndarray) -> np.ndarray:
+    """exp(z), with 0 where z is below _EXP_FLOOR, so exp never underflows or overflows for z <= 0."""
+    return np.where(z > _EXP_FLOOR, np.exp(np.maximum(z, _EXP_FLOOR)), 0.0)
 
-    Notes
-    -----
-    Time Complexity: O(N), N=x.size.
-    Space Complexity: O(N / size of the reduced axis) for the result.
+
+def _shifted_exp(x: np.ndarray, axis):
+    """Per-slice peak, a mask of finite peaks, and exp(x - peak) (all zeros where the peak is not finite).
+
+    The peak is the slice maximum: +inf if the slice holds +inf, -inf if it
+    is all -inf, NaN if it holds NaN. Only slices with a finite peak are
+    exponentiated, so exp never sees +inf or a value above 0.
     """
-    shift = np.max(x, axis=axis, keepdims=True)
-    return np.where(np.isfinite(shift), shift, 0.0)
+    peak = np.max(x, axis=axis, keepdims=True)
+    finite = np.isfinite(peak)
+    z = np.where(finite, x - np.where(finite, peak, 0.0), -np.inf)
+    return peak, finite, _exp_floored(z)
 
 
 def logsumexp(x: ArrayLike, axis: int = None):
     """Compute log(sum(exp(x))) without overflow or underflow.
 
     Uses the max-shift identity log(sum(exp(x))) = m + log(sum(exp(x - m))),
-    with m = max(x), so the largest term is exp(0) = 1.
+    with m = max(x), so the largest term is exp(0) = 1. A slice whose
+    maximum is not finite (it holds +inf or NaN, or is all -inf) gets its
+    result directly and is never exponentiated, so no step overflows, even
+    under ``np.errstate(all="raise")``.
 
     Parameters
     ----------
@@ -244,9 +253,9 @@ def logsumexp(x: ArrayLike, axis: int = None):
     1000.6931471805599
     """
     x = check_array(x)
-    shift = _safe_max(x, axis)
-    with np.errstate(divide="ignore"):         # log(0) = -inf is the right answer
-        out = np.log(np.sum(np.exp(x - shift), axis=axis, keepdims=True)) + shift
+    peak, finite, exp = _shifted_exp(x, axis)
+    total = np.where(finite, np.sum(exp, axis=axis, keepdims=True), 1.0)    # >= 1 where finite
+    out = np.where(finite, np.log(total) + np.where(finite, peak, 0.0), peak)
 
     if axis is None:
         return float(out.reshape(()))
@@ -258,7 +267,9 @@ def softmax(x: ArrayLike, axis: int = -1) -> np.ndarray:
 
     Subtracts the maximum of each slice before exponentiating (max-shifted
     softmax), so large scores do not overflow. The result does not change
-    when a constant is added to every score in a slice.
+    when a constant is added to every score in a slice. Slices holding +inf
+    are resolved before any exponential, so no step overflows, even under
+    ``np.errstate(all="raise")``.
 
     Parameters
     ----------
@@ -271,8 +282,9 @@ def softmax(x: ArrayLike, axis: int = -1) -> np.ndarray:
     Returns
     -------
     ndarray of float, same shape as x
-        Values in [0, 1]. A slice containing NaN or +inf, or made only of
-        -inf, gives NaN.
+        Values in [0, 1]. In a slice containing +inf, the +inf entries share
+        the probability equally and the rest get 0 (the limit of large
+        scores). A slice containing NaN, or made only of -inf, gives NaN.
 
     Raises
     ------
@@ -292,16 +304,23 @@ def softmax(x: ArrayLike, axis: int = -1) -> np.ndarray:
     array([0.5, 0.5])
     """
     x = check_array(x)
-    exp = np.exp(x - _safe_max(x, axis))
-    with np.errstate(invalid="ignore"):       # 0/0 and inf/inf give NaN, as documented
-        return exp / np.sum(exp, axis=axis, keepdims=True)
+    peak, finite, exp = _shifted_exp(x, axis)
+    p = exp / np.where(finite, np.sum(exp, axis=axis, keepdims=True), 1.0)  # sum >= 1 where finite
+
+    # +inf slices: the +inf entries share the mass; NaN or all -inf slices: undefined
+    top = x == np.inf
+    shared = top / np.maximum(np.sum(top, axis=axis, keepdims=True), 1)
+    p = np.where(peak == np.inf, shared, p)
+    return np.where(np.isnan(peak) | (peak == -np.inf), np.nan, p)
 
 
 def sigmoid(x: ArrayLike):
     """Compute the logistic function 1 / (1 + exp(-x)) without overflow.
 
     Uses z = exp(-|x|), which never exceeds 1: x >= 0 gives 1 / (1 + z) and
-    x < 0 gives z / (1 + z), the same value written in a safe form.
+    x < 0 gives z / (1 + z), the same value written in a safe form. z is
+    set to 0 below exp's underflow point, so no step overflows or underflows,
+    even under ``np.errstate(all="raise")``.
 
     Parameters
     ----------
@@ -334,8 +353,9 @@ def sigmoid(x: ArrayLike):
     0.0
     """
     x = check_array(x)
-    z = np.exp(-np.abs(x))
+    z = _exp_floored(-np.abs(x))
     out = np.where(x >= 0, 1.0 / (1.0 + z), z / (1.0 + z))
+    out = np.where(np.isnan(x), np.nan, out)          # the floor would turn NaN into 0
 
     if out.ndim == 0:
         return float(out)
@@ -345,11 +365,12 @@ def sigmoid(x: ArrayLike):
 def pairwise_distances(X: ArrayLike, Y: ArrayLike = None) -> np.ndarray:
     """Euclidean distance between every row of X and every row of Y.
 
-    Expands ||x - y||^2 = ||x||^2 + ||y||^2 - 2 x.y, so the work is one
-    matrix product instead of an (n, m, d) array of differences. Both inputs
-    are first centred on X's column means (distances do not change under a
-    shared shift), which limits cancellation for data far from the origin;
-    rounding below zero is clipped before the square root.
+    Works on the direct differences x - y, so close points stay accurate
+    however widely spread the data is (the expansion ||x||^2 + ||y||^2 - 2 x.y
+    cancels catastrophically when one point is far away). Each difference
+    vector is divided by its largest absolute entry before squaring, as in
+    ``hypot``, so large values do not overflow. Rows of X are processed in
+    vectorised blocks of about 8 MB of differences each.
 
     Parameters
     ----------
@@ -362,7 +383,8 @@ def pairwise_distances(X: ArrayLike, Y: ArrayLike = None) -> np.ndarray:
     -------
     ndarray of float, shape (n, m)
         Entry [i, j] is the distance between X[i] and Y[j]. With Y=None the
-        result is (n, n), symmetric, with an exact zero diagonal.
+        result is (n, n), symmetric, with an exact zero diagonal. A pair with
+        an infinite difference gives inf; NaN propagates.
 
     Raises
     ------
@@ -374,7 +396,8 @@ def pairwise_distances(X: ArrayLike, Y: ArrayLike = None) -> np.ndarray:
     Notes
     -----
     Time Complexity: O(n * m * d).
-    Space Complexity: O(n * m + (n + m) * d).
+    Space Complexity: O(n * m) for the output plus O(b * m * d) for one block
+    of b rows, with b * m * d about 1e6.
 
     Examples
     --------
@@ -388,13 +411,18 @@ def pairwise_distances(X: ArrayLike, Y: ArrayLike = None) -> np.ndarray:
     if X.shape[1] != Y.shape[1]:
         raise ValueError(f"X and Y need the same number of features, got {X.shape[1]} and {Y.shape[1]}")
 
-    centre = X.mean(axis=0)
-    Xc, Yc = X - centre, Y - centre
-    sq = (Xc ** 2).sum(axis=1)[:, None] + (Yc ** 2).sum(axis=1)[None, :] - 2.0 * (Xc @ Yc.T)
-    np.maximum(sq, 0.0, out=sq)               # rounding can leave tiny negatives
+    out = np.empty((X.shape[0], Y.shape[0]))
+    rows = max(1, _BLOCK_FLOATS // (Y.shape[0] * Y.shape[1]))
+
+    for start in range(0, X.shape[0], rows):
+        diff = np.abs(X[start:start + rows, None, :] - Y[None, :, :])        # (b, m, d)
+        scale = diff.max(axis=2)                                             # (b, m)
+        safe = np.where(np.isfinite(scale) & (scale > 0), scale, 1.0)        # 0 and inf: no division
+        out[start:start + rows] = scale * np.sqrt(((diff / safe[..., None]) ** 2).sum(axis=2))
+
     if same:
-        np.fill_diagonal(sq, 0.0)
-    return np.sqrt(sq)
+        np.fill_diagonal(out, 0.0)
+    return out
 
 
 if __name__ == "__main__":
