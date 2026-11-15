@@ -2,7 +2,7 @@
 
 P_AI Assignment 2.2, 2026 S2
 
-Demo video link: _pending_
+Demo video link: [NumCompute-Stream demo](https://drive.google.com/file/d/1a1MS5fbZZIvNp1Wx2trBxgV1s7x14T49/view)
 
 NumCompute-Stream extends NumCompute (Assignment 2.1) into a streaming machine learning toolkit built only on NumPy and matplotlib. Data arrives in chunks; every component learns from each chunk with `partial_fit` or `update` and keeps a bounded amount of state, so memory does not grow with the length of the stream. The model is a depth-limited decision tree that retrains on a buffer of recent rows.
 
