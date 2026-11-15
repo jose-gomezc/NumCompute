@@ -79,10 +79,19 @@ def test_logsumexp_no_overflow_or_underflow():
 
 
 def test_logsumexp_infinite_and_nan_slices():
-    assert logsumexp([-np.inf, -np.inf]) == -np.inf
-    assert logsumexp([1.0, np.inf]) == np.inf
-    np.testing.assert_array_equal(logsumexp([[-np.inf, -np.inf], [0.0, 0.0]], axis=1), [-np.inf, np.log(2.0)])
-    assert np.isnan(logsumexp([1.0, np.nan]))
+    """Mixed-infinity slices are resolved before exp, so strict floating point never raises."""
+    with np.errstate(all="raise"):
+        assert logsumexp([-np.inf, -np.inf]) == -np.inf
+        assert logsumexp([1.0, np.inf]) == np.inf
+        assert logsumexp([np.inf, 1000.0]) == np.inf
+        assert logsumexp([np.inf, -np.inf]) == np.inf
+        assert logsumexp([0.0, -1000.0]) == 0.0                      # exp(-1000) would underflow
+        np.testing.assert_array_equal(logsumexp([[-np.inf, -np.inf], [0.0, 0.0]], axis=1), [-np.inf, np.log(2.0)])
+        assert np.isnan(logsumexp([1.0, np.nan]))
+        np.testing.assert_array_equal(softmax([np.inf, 1000.0]), [1.0, 0.0])
+        np.testing.assert_array_equal(softmax([np.inf, np.inf, 1.0]), [0.5, 0.5, 0.0])
+        np.testing.assert_array_equal(softmax([0.0, -np.inf]), [1.0, 0.0])
+        assert np.isnan(softmax([-np.inf, -np.inf])).all() and np.isnan(softmax([1.0, np.nan])).all()
 
 
 def test_logsumexp_and_softmax_reject_empty_and_text():
@@ -126,9 +135,9 @@ def test_sigmoid_values_and_symmetry():
 
 
 def test_sigmoid_extreme_inputs_without_overflow_and_nan_propagates():
-    with np.errstate(over="raise", invalid="raise"):     # underflow to 0 is fine
-        np.testing.assert_array_equal(sigmoid([-1000.0, 1000.0]), [0.0, 1.0])
-    out = sigmoid([np.nan, 0.0])
+    with np.errstate(all="raise"):
+        np.testing.assert_array_equal(sigmoid([-1000.0, 1000.0, -np.inf, np.inf]), [0.0, 1.0, 0.0, 1.0])
+        out = sigmoid([np.nan, 0.0])
     assert np.isnan(out[0]) and out[1] == 0.5
 
 
@@ -149,10 +158,19 @@ def test_pairwise_distances_self_is_symmetric_with_zero_diagonal():
     assert D[0, 1] == pytest.approx(5.0) and D[1, 2] == 0.0
 
 
-def test_pairwise_distances_far_from_origin():
-    """Centring keeps unit distances accurate for points near 1e8."""
+def test_pairwise_distances_far_from_origin_and_mixed_scale():
+    """Direct differences keep close points exact, however far away other points are."""
     X = np.array([[1e8, 1e8], [1e8 + 1.0, 1e8]])
-    np.testing.assert_allclose(pairwise_distances(X), [[0.0, 1.0], [1.0, 0.0]], atol=1e-6)
+    np.testing.assert_array_equal(pairwise_distances(X), [[0.0, 1.0], [1.0, 0.0]])
+
+    mixed = np.array([[0.0, 0.0], [0.0, 1.0], [1e12, 0.0]])      # the expansion returned 0 here
+    D = pairwise_distances(mixed)
+    assert D[0, 1] == 1.0 and D[0, 2] == 1e12
+
+    with np.errstate(over="raise"):                               # squaring 1e200 would overflow
+        assert pairwise_distances([[0.0, 0.0]], [[3e200, 4e200]])[0, 0] == pytest.approx(5e200)
+    D = pairwise_distances([[0.0, 0.0]], [[np.inf, 0.0], [np.nan, 0.0]])
+    assert D[0, 0] == np.inf and np.isnan(D[0, 1])
 
 
 def test_pairwise_distances_errors():

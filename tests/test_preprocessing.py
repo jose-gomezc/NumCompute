@@ -64,8 +64,30 @@ def test_minmax_constant_column_maps_to_range_min():
 
 
 def test_minmax_invalid_range_rejected():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="low < high"):
         MinMaxScaler(feature_range=(1, 1))
+    with pytest.raises(ValueError, match="finite"):
+        MinMaxScaler(feature_range=(np.nan, 1))      # NaN < 1 is False, so low < high alone misses it
+    with pytest.raises(ValueError, match="finite"):
+        MinMaxScaler(feature_range=(0, np.inf))
+    with pytest.raises(TypeError, match="real numbers"):
+        MinMaxScaler(feature_range=("a", 1))
+
+
+@pytest.mark.parametrize(
+    "transformer",
+    [StandardScaler(), MinMaxScaler(), SimpleImputer("mean"), SimpleImputer("median")],
+    ids=["standard", "minmax", "imputer_mean", "imputer_median"],
+)
+def test_fit_rejects_infinity_and_keeps_the_fitted_state(transformer):
+    """One inf would make the mean or range infinite and every later output NaN."""
+    transformer.fit([[0.0], [2.0]])
+    before = transformer.transform([[1.0]])
+    with pytest.raises(ValueError, match="infinity"):
+        transformer.fit([[1.0], [np.inf]])
+    with pytest.raises(ValueError, match="infinity"):
+        transformer.fit([[-np.inf], [1.0]])
+    np.testing.assert_array_equal(transformer.transform([[1.0]]), before)
 
 
 def test_minmax_unseen_values_extrapolate():

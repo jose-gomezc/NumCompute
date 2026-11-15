@@ -91,6 +91,13 @@ def test_streaming_stats_edge_cases():
         stats.update_stats([[1.0, np.inf, 2.0]])
     with pytest.raises(ValueError, match=r"\[0, 1\]"):
         stats.quantile(1.5)
+    with pytest.raises(ValueError, match=r"\[0, 1\]"):
+        stats.quantile(np.nan)
+    with pytest.raises(ValueError, match="1-D"):
+        stats.quantile([[0.5]])
+    with pytest.raises(TypeError, match="number"):
+        stats.quantile("median")
+    stats.update_stats([])                                    # empty chunk: ignored
     assert stats.n_ == 3                                      # rejected chunks changed nothing
 
 
@@ -192,5 +199,9 @@ def test_partial_fit_rejects_bad_chunks_without_changing_state(transformer, X):
     before = transformer.transform(X)
     with pytest.raises(ValueError, match="expected 2 features"):
         transformer.partial_fit([[1.0, 2.0, 3.0]])
-    transformer.partial_fit(np.empty((0, 2)))                  # empty chunk: ignored
+    if not isinstance(transformer, OneHotEncoder):             # "inf" is just a category to the encoder
+        with pytest.raises(ValueError, match="infinity"):
+            transformer.partial_fit([[np.inf, 1.0]])
+    transformer.partial_fit(np.empty((0, 2)))                  # empty chunks: ignored
+    transformer.partial_fit([])
     np.testing.assert_array_equal(transformer.transform(X), before)

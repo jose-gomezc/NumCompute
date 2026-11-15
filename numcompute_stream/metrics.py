@@ -954,7 +954,8 @@ class StreamingAUC:
             ``pos_label``, or ``y_score`` is not numeric.
         ValueError
             If the inputs are not 1-D, have different lengths or contain NaN,
-            a score is outside [0, 1], or more than 2 labels are seen.
+            a score is outside [0, 1], more than 2 labels are seen, or 2
+            labels are seen and neither is ``pos_label``.
 
         Notes
         -----
@@ -976,6 +977,8 @@ class StreamingAUC:
 
         if labels.size > 2:
             raise ValueError(f"StreamingAUC is for binary labels, got {labels.tolist()}")
+        if labels.size == 2 and not np.isin(self._pos_label, labels).all():
+            raise ValueError(f"pos_label {self.pos_label!r} is not one of the labels {labels.tolist()}")
 
         # All checks passed: only now change the state
         self.labels_ = labels

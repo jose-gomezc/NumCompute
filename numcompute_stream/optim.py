@@ -46,13 +46,13 @@ def _check_input(x, h, method):
     """
     if np.iscomplexobj(x):
         raise TypeError("x must contain real numbers")
-    
+
     x = np.asarray(x, dtype=float)
     if x.ndim != 1 or x.size == 0 or not np.isfinite(x).all():
         raise ValueError("x must be a nonempty, finite, one-dimensional array")
     if np.ndim(h) != 0 or np.iscomplexobj(h):
         raise ValueError("h must be a positive finite scalar")
-    
+
     h = float(h)
     if not np.isfinite(h) or h <= 0:
         raise ValueError("h must be a positive finite scalar")
@@ -67,7 +67,7 @@ def _check_input(x, h, method):
         raise ValueError("h is too small or too large for x; change h or rescale x")
     if method == "central" and (not np.isfinite(minus).all() or np.any(minus == x)):
         raise ValueError("h is too small or too large for x; change h or rescale x")
-    
+
     return x, h
 
 
@@ -105,13 +105,13 @@ def _evaluate(function, x, expected_shape=None):
     value = function(x.copy())
     if np.iscomplexobj(value):
         raise TypeError("function output must contain real numbers")
-    
+
     value = np.array(value, dtype=float, copy=True)
     if expected_shape is not None and value.shape != expected_shape:
         raise ValueError("function output shape must remain unchanged")
     if not np.isfinite(value).all():
         raise ValueError("function output must be finite at all evaluation points")
-    
+
     return value
 
 

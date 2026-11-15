@@ -172,7 +172,7 @@ print(gini([0, 0, 1, 1]))                            # 0.5
 | `SimpleImputer().partial_fit(X)` | A chunk `(n, d)`; `strategy` and `fill_value` as in 2.1 | The same imputer (`self`) | Update the replacement values on the fly: exact running mean for `"mean"`, an estimate from a streaming histogram for `"median"`, the fixed value for `"constant"`. |
 | `OneHotEncoder().partial_fit(X)` | A categorical chunk `(n, d)` | The same encoder (`self`) | Learn new categories; each new category gets a new column at the end of the output, so existing columns never move. |
 
-`fit`, `transform` and `fit_transform` behave as in 2.1; `fit` resets the state before learning. A chunk with the wrong number of features is rejected without changing the state, and empty chunks are ignored.
+`fit`, `transform` and `fit_transform` behave as in 2.1; `fit` resets the state before learning. A chunk with the wrong number of features or with infinite values is rejected without changing the state, and empty chunks are ignored. With `StreamTrainer`, create the encoder with `OneHotEncoder(handle_unknown="ignore")`: test-then-train transforms each chunk before `partial_fit` sees it, so a new category is first scored as all zeros and then learnt.
 
 ```python
 import numpy as np
@@ -352,19 +352,19 @@ Run all tests from the project root after installing the test dependencies with 
 python -m pytest tests -q
 ```
 
-Latest local verification (15 November 2026): **296 tests passed** across 18 test files, using Python 3.14.7 and NumPy 2.5.4. The 2.2 streaming features add 84 of them, from 47 test functions in the last eight files of the table.
+Latest local verification (15 November 2026): **301 tests passed** across 18 test files, using Python 3.14.7 and NumPy 2.5.4. The 2.2 work adds 89 of them, from 48 test functions: 47 in the last eight files of the table and one in `test_preprocessing.py` (fitting rejects infinity).
 
 | Test file | Coverage |
 | --- | --- |
 | `test_io.py` | Headers/BOM, custom delimiters, dtype conversion, missing tokens, fill/skip/raise policies, column selection, empty files and chunked reading. |
-| `test_preprocessing.py` | Scaling results, constant columns, NaN handling, imputation strategies, categorical encoding, unseen categories and input validation. |
+| `test_preprocessing.py` | Scaling results, constant columns, NaN handling, imputation strategies, categorical encoding, unseen categories and input validation, including NaN or infinite `MinMaxScaler` bounds and infinite training values. |
 | `test_sort_search.py` | Sorting and stability, multi-key order, top-k values/indices and boundary k, quickselect, duplicate search results and insertion positions. |
 | `test_rank.py` | Average/min/max/dense/ordinal ties, descending ranks, compatibility alias, percentile-rank methods, interpolation and NaN handling. |
 | `test_stats.py` | Axis-wise summaries, quantile shapes, histogram counts/density, all-equal values and streaming moments with large-offset data. |
 | `test_metrics.py` | Classification and regression results, averaging modes, zero denominators, confusion-matrix label order, tied ROC scores and AUC. |
 | `test_optim.py` | Forward/central differences against analytical derivatives, rectangular Jacobian orientation, invalid step sizes, changing output shapes and nonfinite results. |
 | `test_pipeline.py` | Chained preprocessing, reuse of fitted parameters, estimator fit/predict dispatch, fitted-state errors, failed refits and feature-count checks. |
-| `test_utils.py` | Array validation, row-batch views, lazy iterable batching, invalid batch sizes, overflow-free logsumexp/softmax/sigmoid, infinite/NaN inputs and distances far from the origin. |
+| `test_utils.py` | Array validation, row-batch views, lazy iterable batching, invalid batch sizes, overflow-free logsumexp/softmax/sigmoid, mixed-infinity and NaN slices under strict floating point, and exact mixed-scale distances. |
 | `test_benchmarking.py` | Timing output/call counts, result-equivalence checks, validation, environment/table formatting and all 10 quick benchmark cases through the runner. |
 | `test_tree.py` | Impurities, split search and ties, depth and split limits, `max_features`, `export_text`, buffered retraining and `flush`, classes kept across the stream, rejected and empty chunks, input validation. |
 | `test_streaming_metrics.py` | Chunked results equal batch results, rolling windows, growing labels, accumulated confusion matrix and AUC, empty state and `reset`, input validation. |
@@ -375,7 +375,7 @@ Latest local verification (15 November 2026): **296 tests passed** across 18 tes
 | `test_stream_benchmarks.py` | Loop baselines match the NumPy code; the runner writes its report and figures. |
 | `test_end_to_end.py` | CSV → pipeline → trainer with drift recovery; new categories from the CSV; the demo notebook runs from top to bottom. |
 
-Edge cases include empty chunks, chunks rejected without changing the state, NaN values, single-class and constant data, tied split gains, labels and categories that first appear mid-stream, and metrics before any data. Benchmark tests verify correctness and report generation rather than requiring a fixed runtime or speedup, since timings depend on the machine. Plot tests use matplotlib's off-screen Agg backend.
+Edge cases include empty chunks, chunks rejected without changing the state, NaN and infinite values, single-class and constant data, tied split gains, labels and categories that first appear mid-stream, and metrics before any data. Benchmark tests verify correctness and report generation rather than requiring a fixed runtime or speedup, since timings depend on the machine. Plot tests use matplotlib's off-screen Agg backend.
 
 To run one test file:
 
@@ -414,6 +414,17 @@ The directory tree above also includes `demo/generate_stream.py`, which generate
 - **Scaling on arrival.** The pipeline scales each chunk with the statistics known when it arrives, so one buffer can mix slightly different scalings. Rescaling the buffer with the latest statistics at each retrain changed accuracy by at most 0.006 on the demo stream, so the simpler behaviour was kept.
 - **New categories.** `OneHotEncoder` appends new columns at the end; `Pipeline` calls `tree.add_features`, which pads the rows already buffered with zeros.
 - **Splits.** The tree sends `x <= t` to the left child.
+
+### Numerical fixes since 2.1
+
+The 2.1 review left three numerical issues open (the first three rows); the fourth was found while auditing 2.2. Each row records the diagnosis, the correction and the test that verifies it.
+
+| Issue | Diagnosis | Correction | Verified by |
+| --- | --- | --- | --- |
+| Mixed-scale distances | `pairwise_distances` expanded `‖x‖² + ‖y‖² − 2x·y`, which cancels when another point is far away: `[[0, 0], [0, 1], [1e12, 0]]` gave 0 for a distance of 1. | Direct differences `x − y`, computed in vectorised row blocks; each difference vector is divided by its largest entry before squaring, so large values do not overflow. | `test_pairwise_distances_far_from_origin_and_mixed_scale`: exact 1 and 1e12, 5e200 without overflow. |
+| Mixed-infinity reductions | A slice holding `+inf` got a shift of 0, so `logsumexp([inf, 1000])` evaluated `exp(1000)` and overflowed under `np.errstate(all="raise")`; `softmax` did the same. | Slices whose maximum is `+inf`, `-inf` or NaN get their result before any exponential (`softmax` shares the mass among the `+inf` entries); `exp` arguments are floored at its underflow point, also in `sigmoid`. | `test_logsumexp_infinite_and_nan_slices` and `test_sigmoid_extreme_inputs_without_overflow_and_nan_propagates`, under strict floating point. |
+| NaN range bounds | `MinMaxScaler` only checked `low >= high`, which is False when either bound is NaN, so `(nan, 1)` was accepted and every output was NaN. | Both bounds must be finite real numbers, then `low < high`. | `test_minmax_invalid_range_rejected`: NaN, infinite and text bounds raise. |
+| Infinite training values | One `inf` made `StandardScaler`'s mean and scale NaN for every later chunk, and the mean imputer filled gaps with `inf`. | `fit` and `partial_fit` of the scalers and the numeric imputer reject infinity; a rejected chunk leaves the state unchanged. | `test_fit_rejects_infinity_and_keeps_the_fitted_state` and `test_partial_fit_rejects_bad_chunks_without_changing_state`. |
 
 ### Notes
 

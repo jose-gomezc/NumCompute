@@ -59,7 +59,9 @@ class StreamTrainer:
     Notes
     -----
     Until the model has trained once (its final estimator has ``classes_``),
-    scores are NaN and the metrics are not updated. Retrain details and
+    scores are NaN and the metrics are not updated. AUC counts only chunks
+    scored once the tree knows both classes, and is NaN for good once a
+    third label appears. Retrain details and
     memory come from the final estimator's ``n_retrains_``, ``fit_time_``,
     ``n_buffered_`` and ``memory_usage()`` when it has them, else NaN.
 
@@ -104,8 +106,9 @@ class StreamTrainer:
         self._accuracy = StreamingAccuracy()
         self._rolling = StreamingAccuracy(window=self.window)
         self._f1 = StreamingF1(average="macro")
-        self._auc = None                  # created on the first binary chunk, with its positive label
-        self._auc_valid = True            # False once more than 2 classes appear
+        self._auc = None                  # created once the tree knows 2 classes, with its positive label
+        self._auc_valid = True            # False once more than 2 labels appear
+        self._labels = None               # labels seen in y and in the tree's classes_
 
         for metric in self.metrics.values():
             if callable(getattr(metric, "reset", None)):
@@ -113,7 +116,7 @@ class StreamTrainer:
 
         self._last_fit = {"retrained": False, "retrain_time": np.nan, "n_retrains": np.nan}
         self.history_ = {key: [] for key in (*_LOG_KEYS, *self.metrics)}
-        
+
         return self
 
     def score_chunk(self, X, y) -> dict:
@@ -194,7 +197,7 @@ class StreamTrainer:
             "retrain_time": final.fit_time_ if retrained else np.nan,
             "n_retrains": np.nan if after is None else after,
         }
-        
+
         return self
 
     def process_chunk(self, X, y) -> dict:
@@ -245,6 +248,12 @@ class StreamTrainer:
         -------
         dict
             ``history_``.
+
+        Notes
+        -----
+        The flush runs after the last record and is not logged: ``history_``
+        keeps one entry per chunk, so its last ``n_retrains`` and
+        ``n_buffered`` describe the model before the flush.
         """
         for X, y in chunks:
             self.process_chunk(X, y)
@@ -271,13 +280,13 @@ class StreamTrainer:
             raise ValueError("the model does not provide flush")
 
         self.model.flush()
-        
+
         return self
 
     def _final_estimator(self):
         """The model itself, or the last step of a Pipeline."""
         steps = getattr(self.model, "steps", None)
-        
+
         return steps[-1][1] if steps else self.model
 
     def _is_ready(self) -> bool:
@@ -285,14 +294,19 @@ class StreamTrainer:
         return hasattr(self._final_estimator(), "classes_")
 
     def _update_auc(self, X, y: np.ndarray) -> None:
-        """Feed positive-class scores to the AUC while labels stay binary."""
-        classes = self._final_estimator().classes_
-
+        """Feed positive-class scores to the AUC while the stream stays binary."""
         if not self._auc_valid or not callable(getattr(self.model, "predict_proba", None)):
             return
 
-        if classes.size != 2 or not np.isin(y, classes).all():
+        classes = self._final_estimator().classes_
+        labels = np.union1d(y, classes)
+        self._labels = labels if self._labels is None else np.union1d(self._labels, labels)
+
+        if self._labels.size > 2:
             self._auc_valid = False      # AUC here is binary only
+            return
+
+        if classes.size < 2:             # the tree knows one class: no score to rank yet
             return
 
         if self._auc is None:
@@ -315,7 +329,7 @@ class StreamTrainer:
 def _format(record: dict) -> str:
     """One summary line for a logged record."""
     retrain = f"retrained {record['retrain_time'] * 1000:6.1f} ms" if record["retrained"] else "retrained      -  "
-    
+
     return (
         f"chunk {record['chunk']:4d} | n {record['n_samples']:5d} | acc {record['accuracy']:.3f} "
         f"| cum {record['cumulative_accuracy']:.3f} | roll {record['rolling_accuracy']:.3f} "

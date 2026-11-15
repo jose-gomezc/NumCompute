@@ -599,7 +599,7 @@ class StreamingStats:
         An empty chunk (0 rows) is ignored; a rejected chunk changes nothing.
         Time: O(n * d), plus O(d * n_bins) when a histogram widens.
         """
-        if np.ndim(X_chunk) == 2 and np.shape(X_chunk)[0] == 0:
+        if np.ndim(X_chunk) in (1, 2) and np.shape(X_chunk)[0] == 0:
             return self
 
         X = check_array(X_chunk, ndim=2)
@@ -738,8 +738,11 @@ class StreamingStats:
         ------
         RuntimeError
             If no data has been added.
+        TypeError
+            If ``q`` is not numeric.
         ValueError
-            If ``q`` is empty or outside [0, 1].
+            If ``q`` is empty, has more than 1 dimension, or is NaN or
+            outside [0, 1].
 
         Notes
         -----
@@ -751,9 +754,15 @@ class StreamingStats:
         ``q=1`` give the exact min and max. Time: O(len(q) * d * n_bins).
         """
         count, _, _, lo_val, hi_val, hist = self._check_data()
-        q = np.asarray(q, dtype=float)
 
-        if q.size == 0 or np.any(q < 0) or np.any(q > 1):
+        try:
+            q = np.asarray(q, dtype=float)
+        except (TypeError, ValueError):
+            raise TypeError(f"q must be a number or a 1-D sequence of numbers, got {q!r}") from None
+
+        if q.ndim > 1:
+            raise ValueError(f"q must be a number or 1-D, got shape {q.shape}")
+        if q.size == 0 or not np.all((q >= 0) & (q <= 1)):    # NaN fails both comparisons
             raise ValueError("q must lie in [0, 1]")
 
         last = np.maximum(count - 1, 0)                         # (d,) rank of the largest value

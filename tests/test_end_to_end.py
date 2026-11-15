@@ -41,15 +41,19 @@ def test_csv_stream_trains_pipeline_and_recovers_from_drift():
 
 
 def test_new_category_in_csv_stream_grows_encoder_and_tree():
-    encoder, tree = OneHotEncoder(), DecisionTreeClassifier(max_depth=3, buffer_size=500)
+    # Test-then-train transforms each chunk before partial_fit sees it, so D must be scored unseen
+    encoder = OneHotEncoder(handle_unknown="ignore")
+    tree = DecisionTreeClassifier(max_depth=3, buffer_size=500)
     pipe = Pipeline([("encode", encoder), ("tree", tree)])
+    trainer = StreamTrainer(pipe)
     widths = []
 
     for chunk in io.iter_csv_chunks(STREAM_CSV, 100, usecols=["segment", "label"]):
-        pipe.partial_fit(chunk[:, :1], chunk[:, 1].astype(int))
+        trainer.process_chunk(chunk[:, :1], chunk[:, 1].astype(int))
         widths.append(encoder.n_features_out_)
 
     assert widths == [3] * 100 + [4] * 100                # category D first appears at chunk 100
+    assert not np.isnan(trainer.history_["accuracy"][100])   # the chunk with D was scored
     np.testing.assert_array_equal(encoder.categories_[0], ["A", "B", "C", "D"])
     assert tree.n_features_in_ == 4
     np.testing.assert_array_equal(encoder.transform(np.array([["D"]])), [[0, 0, 0, 1]])

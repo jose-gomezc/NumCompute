@@ -27,6 +27,14 @@ def test_plot_metric_over_time_lines_events_and_saving(tmp_path):
     assert [t.get_text() for t in ax.get_legend().get_texts()] == ["a", "b", "c", "retrain"]
     assert path.stat().st_size > 0
 
+    # With custom x, a mask marks the flagged values' positions; numbers are x positions
+    ax = plot_metric_over_time([0.8, 0.85, 0.9], x=[100, 500, 1000], events=[False, True, False])
+    assert ax.get_lines()[1].get_xdata()[0] == 500
+    ax = plot_metric_over_time([0.8, 0.85, 0.9], x=[100, 500, 1000], events=[1000])
+    assert ax.get_lines()[1].get_xdata()[0] == 1000
+    with pytest.raises(ValueError, match="one flag per value"):
+        plot_metric_over_time([0.8, 0.85, 0.9], x=[100, 500, 1000], events=[True, False])
+
     with pytest.raises(ValueError, match="non-empty 1-D"):
         plot_metric_over_time([])
     with pytest.raises(ValueError, match="non-empty 1-D"):
@@ -57,6 +65,9 @@ def test_predictions_vs_ground_truth_sequence_and_confusion():
     assert len(wrong.get_offsets()) == 2
     assert ax.get_title(loc="left") == "Latest chunk: 3/5 correct"
     assert [t.get_text() for t in ax.get_yticklabels()] == ["no", "yes"]
+
+    ax = plot_predictions_vs_ground_truth(y_true, y_true)          # all correct: no "wrong" entry
+    assert [t.get_text() for t in ax.get_legend().get_texts()] == ["true", "predicted"]
 
     ax = plot_predictions_vs_ground_truth(y_true, y_pred, kind="confusion")
     np.testing.assert_array_equal(ax.get_images()[0].get_array(), confusion_matrix(y_true, y_pred))

@@ -91,6 +91,13 @@ def test_auc_and_extra_metrics_depend_on_the_labels():
     assert np.isnan(multi["cumulative_auc"]).all()
     assert not np.isnan(multi["cumulative_f1"][-1])
 
+    # First retrain sees one class only: AUC waits for a tree that knows both, then counts
+    late = y.copy()
+    late[:200] = 0
+    one_first = StreamTrainer(DecisionTreeClassifier(buffer_size=200)).run(_chunks(X, late))
+    auc = np.asarray(one_first["cumulative_auc"])
+    assert np.isnan(auc[:4]).all() and 0.5 < auc[-1] <= 1.0
+
 
 class _NoFlushModel:
     """A streaming model without flush or memory reporting."""

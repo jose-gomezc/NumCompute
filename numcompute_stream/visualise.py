@@ -43,9 +43,11 @@ def plot_metric_over_time(metric_values, title: str = "Metric over time", ylabel
         drawn as separate lines (at most 8).
     title, ylabel, xlabel : str
         Plot title and axis labels.
-    events : sequence of bool or of int, optional
-        Chunks to mark with a thin vertical line, as a boolean mask (e.g.
-        ``history_["retrained"]``) or as chunk indices.
+    events : sequence of bool or of float, optional
+        Chunks to mark with a thin vertical line, as a boolean mask with one
+        flag per value (e.g. ``history_["retrained"]``), drawn at those
+        values' positions, or as positions on the x-axis (chunk indices when
+        ``x`` is omitted).
     events_label : str, default "event"
         Legend entry for the event lines.
     ax : matplotlib Axes, optional
@@ -69,7 +71,7 @@ def plot_metric_over_time(metric_values, title: str = "Metric over time", ylabel
         If a series is not numeric.
     ValueError
         If a series is empty or not 1-D, there are more than 8 series, or
-        ``x`` does not have one position per value.
+        ``x`` or a boolean ``events`` mask does not have one entry per value.
 
     Examples
     --------
@@ -96,14 +98,20 @@ def plot_metric_over_time(metric_values, title: str = "Metric over time", ylabel
 
     if events is not None:
         events = np.asarray(events)
-        positions = np.flatnonzero(events) if events.dtype == bool else events.ravel()
 
-        for i, x in enumerate(positions):
-            ax.axvline(x, color=_MUTED, linewidth=0.8, linestyle=(0, (2, 3)),
+        if events.dtype == bool:                     # a mask: one flag per value, placed like the values
+            if x is not None and events.shape != x.shape:
+                raise ValueError(f"an events mask needs one flag per value, got shape {events.shape}")
+            positions = np.flatnonzero(events) if x is None else x[events]
+        else:
+            positions = events.ravel()
+
+        for i, position in enumerate(positions):
+            ax.axvline(position, color=_MUTED, linewidth=0.8, linestyle=(0, (2, 3)),
                        label=events_label if i == 0 else None)
 
     legend = len(series) > 1 or (events is not None and len(positions) > 0)
-    
+
     return _finish(ax, title, xlabel, ylabel, legend, save_path, show)
 
 
@@ -209,8 +217,9 @@ def plot_predictions_vs_ground_truth(y_true, y_pred, kind: str = "sequence", tit
         ax.scatter(idx, true_row, s=64, facecolors="none", edgecolors=PALETTE[0], linewidths=1.5,
                    label="true", zorder=2)
         ax.scatter(idx, pred_row, s=20, color=PALETTE[1], label="predicted", zorder=3)
-        ax.scatter(idx[wrong], pred_row[wrong], s=80, marker="x", color=ERROR, linewidths=2,
-                   label="wrong", zorder=4)
+        if wrong.any():                              # no legend entry when nothing is wrong
+            ax.scatter(idx[wrong], pred_row[wrong], s=80, marker="x", color=ERROR, linewidths=2,
+                       label="wrong", zorder=4)
         ax.set_yticks(np.arange(classes.size), [str(c) for c in classes])
         ax.set_ylim(-0.6, classes.size - 0.4)
         return _finish(ax, title, "Sample in chunk", "Class", True, save_path, show)

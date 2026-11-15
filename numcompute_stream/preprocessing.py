@@ -49,8 +49,14 @@ def _check_fitted(transformer, X: np.ndarray) -> None:
 
 
 def _is_empty_chunk(X) -> bool:
-    """True for a 2-D chunk with no rows, which partial_fit ignores."""
-    return np.ndim(X) == 2 and np.shape(X)[0] == 0
+    """True for a chunk with no rows (``[]`` or shape (0, d)), which partial_fit ignores."""
+    return np.ndim(X) in (1, 2) and np.shape(X)[0] == 0
+
+
+def _check_finite(X: np.ndarray) -> None:
+    """Raise if numeric X holds +inf or -inf, which would corrupt the learnt statistics."""
+    if np.isinf(X).any():
+        raise ValueError("X contains infinity; replace or drop infinite values before fitting")
 
 
 def _check_n_features(transformer, X: np.ndarray) -> None:
@@ -116,7 +122,7 @@ class StandardScaler:
         TypeError
             If X cannot be converted to numbers.
         ValueError
-            If X is empty or not two-dimensional.
+            If X is empty, not two-dimensional or contains infinity.
 
         Notes
         -----
@@ -125,6 +131,7 @@ class StandardScaler:
         All-NaN columns retain NaN statistics.
         """
         X = check_array(X, ndim=2)
+        _check_finite(X)
         _clear(self, ("n_samples_seen_", "_mean", "_m2", "mean_", "scale_", "n_features_in_"))
         return self._update(X)
 
@@ -146,10 +153,12 @@ class StandardScaler:
         TypeError
             If X cannot be converted to numbers.
         ValueError
-            If X is not two-dimensional or its feature count differs from earlier data.
+            If X is not two-dimensional, contains infinity or its feature
+            count differs from earlier data.
 
         Notes
         -----
+        A rejected chunk leaves the state unchanged.
         Time: O(n_samples * n_features). Stored state: O(n_features).
         """
         if _is_empty_chunk(X):
@@ -157,6 +166,7 @@ class StandardScaler:
 
         X = check_array(X, ndim=2)
         _check_n_features(self, X)
+        _check_finite(X)
         return self._update(X)
 
     def _update(self, X: np.ndarray) -> "StandardScaler":
@@ -288,15 +298,23 @@ class MinMaxScaler:
         Raises
         ------
         ValueError
-            If two endpoints cannot be unpacked or low >= high.
+            If two endpoints cannot be unpacked, an endpoint is NaN or
+            infinite, or low >= high.
         TypeError
-            If endpoints cannot be compared or the range is not iterable.
+            If an endpoint is not a real number or the range is not iterable.
 
         Notes
         -----
         Time and space: O(1).
         """
         low, high = feature_range
+
+        for end in (low, high):
+            if isinstance(end, bool) or not isinstance(end, (int, float, np.integer, np.floating)):
+                raise TypeError(f"feature_range endpoints must be real numbers, got {feature_range!r}")
+            if not np.isfinite(end):
+                raise ValueError(f"feature_range endpoints must be finite, got {feature_range}")
+
         if low >= high:
             raise ValueError(f"feature_range must have low < high, got {feature_range}")
         self.feature_range = (low, high)
@@ -319,7 +337,7 @@ class MinMaxScaler:
         TypeError
             If X cannot be converted to numbers.
         ValueError
-            If X is empty or not two-dimensional.
+            If X is empty, not two-dimensional or contains infinity.
 
         Notes
         -----
@@ -328,6 +346,7 @@ class MinMaxScaler:
         All-NaN columns retain NaN statistics.
         """
         X = check_array(X, ndim=2)
+        _check_finite(X)
         _clear(self, ("data_min_", "data_max_", "data_range_", "n_features_in_"))
         return self._update(X)
 
@@ -349,10 +368,12 @@ class MinMaxScaler:
         TypeError
             If X cannot be converted to numbers.
         ValueError
-            If X is not two-dimensional or its feature count differs from earlier data.
+            If X is not two-dimensional, contains infinity or its feature
+            count differs from earlier data.
 
         Notes
         -----
+        A rejected chunk leaves the state unchanged.
         Time: O(n_samples * n_features). Stored state: O(n_features).
         """
         if _is_empty_chunk(X):
@@ -360,6 +381,7 @@ class MinMaxScaler:
 
         X = check_array(X, ndim=2)
         _check_n_features(self, X)
+        _check_finite(X)
         return self._update(X)
 
     def _update(self, X: np.ndarray) -> "MinMaxScaler":
@@ -477,7 +499,8 @@ class SimpleImputer:
     take O(n*d) time; median has a conservative O(d*n*log(n)) bound. Working
     space is O(n*d), with O(d) stored statistics, for bounded string lengths.
     With ``partial_fit``, the mean is exact and the median is approximated
-    from a ``StreamingStats`` histogram (error at most one bin width).
+    from a ``StreamingStats`` histogram (error at most one bin width). Numeric
+    fitting rejects infinity, which would make the mean infinite.
     """
 
     def __init__(self, strategy: str = None, fill_value=None):
@@ -551,6 +574,11 @@ class SimpleImputer:
             raise ValueError(f"X must be a non-empty 2-D array, got shape {X.shape}")
         return X
 
+    def _check_finite(self, X: np.ndarray) -> None:
+        """Reject infinity in numeric mode; string data is not checked."""
+        if not isinstance(self.fill_value, str):
+            _check_finite(X)
+
     def fit(self, X: np.ndarray) -> "SimpleImputer":
         """Learn one replacement value per feature.
 
@@ -570,7 +598,7 @@ class SimpleImputer:
         TypeError
             If X cannot be converted to numbers.
         ValueError
-            If X is empty or not two-dimensional.
+            If X is empty, not two-dimensional or (numeric mode) contains infinity.
 
         Notes
         -----
@@ -579,6 +607,7 @@ class SimpleImputer:
         All-NaN numeric columns use fill_value instead of a mean or median.
         """
         X = self._as_array(X)
+        self._check_finite(X)
         _clear(self, ("statistics_", "n_features_in_", "_moments", "_stats"))
         self._update(X)
 
@@ -609,12 +638,15 @@ class SimpleImputer:
         TypeError
             If X cannot be converted to numbers.
         ValueError
-            If X is not two-dimensional or its feature count differs from earlier data.
+            If X is not two-dimensional, (numeric mode) contains infinity, or
+            its feature count differs from earlier data.
 
         Notes
         -----
-        The mean is exact; the median is approximate (infinite values are
-        ignored by it). Columns with no values yet use ``fill_value``.
+        The mean is exact; the median is approximate, within one histogram
+        bin width. One extreme value widens every bin, so the streaming median
+        can then be far from the exact one. Columns with no values yet use
+        ``fill_value``. A rejected chunk leaves the state unchanged.
         Time: O(n_samples * n_features). Stored state: O(n_features), or
         O(n_features * n_bins) for the median.
         """
@@ -623,6 +655,7 @@ class SimpleImputer:
 
         X = self._as_array(X)
         _check_n_features(self, X)
+        self._check_finite(X)
         return self._update(X)
 
     def _update(self, X: np.ndarray) -> "SimpleImputer":
@@ -645,7 +678,7 @@ class SimpleImputer:
             if not hasattr(self, "_stats"):
                 self._stats = StreamingStats()
 
-            self._stats.update_stats(np.where(np.isinf(X), np.nan, X))
+            self._stats.update_stats(X)
             median = self._stats.quantile(0.5)
             self.statistics_ = np.where(self._stats.count_ > 0, median, self.fill_value)
 
@@ -721,6 +754,8 @@ class OneHotEncoder:
     ----------
     handle_unknown : {'error', 'ignore'}, default 'error'
         Raise for unseen nonmissing categories or encode their block as zeros.
+        Use 'ignore' in a test-then-train stream, where a chunk is transformed
+        before ``partial_fit`` has seen its new categories.
 
     Attributes
     ----------
@@ -910,7 +945,9 @@ class OneHotEncoder:
             present = ~np.isin(column, self.MISSING)
             unknown = present & ~block.any(axis=1)
             if unknown.any() and self.handle_unknown == "error":
-                raise ValueError(f"unknown categories in column {j}: {np.unique(column[unknown]).tolist()}")
+                raise ValueError(f"unknown categories in column {j}: {np.unique(column[unknown]).tolist()}; "
+                                 "when streaming, use handle_unknown='ignore' so a new category can be "
+                                 "scored before partial_fit learns it")
 
             out[:, self._columns[j]] = block                # this feature's output columns
         return out

@@ -290,7 +290,7 @@ class Pipeline:
         Time: O(s) dispatch plus the sum of the steps' partial_fit and
         transform costs.
         """
-        if np.ndim(X) == 2 and np.shape(X)[0] == 0:
+        if np.ndim(X) in (1, 2) and np.shape(X)[0] == 0:
             return self
 
         for name, step in self.steps:

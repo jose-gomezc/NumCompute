@@ -123,6 +123,9 @@ def test_streaming_auc_edge_cases():
         roc.update([2], [0.5])
     assert roc.n_seen_ == 3                     # rejected chunks changed nothing
 
+    with pytest.raises(ValueError, match="pos_label 1 is not one of"):
+        StreamingAUC().update([0, 2], [0.2, 0.8])
+
 
 @pytest.mark.parametrize(
     "call, error, match",

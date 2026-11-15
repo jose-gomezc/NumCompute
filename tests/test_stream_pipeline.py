@@ -102,7 +102,8 @@ def test_streaming_errors_and_empty_chunks():
         batch_only.partial_fit([[1.0], [2.0]], [0, 1])
 
     pipe = Pipeline([("scale", StandardScaler()), ("model", DecisionTreeClassifier())])
-    pipe.partial_fit(np.empty((0, 3)), [])                    # empty chunk: ignored
+    pipe.partial_fit(np.empty((0, 3)), [])                    # empty chunks: ignored
+    pipe.partial_fit([], [])
     assert not pipe.is_fitted_
     with pytest.raises(ValueError, match="partial_fit before predict_proba"):
         pipe.predict_proba([[1.0, 2.0, 3.0]])

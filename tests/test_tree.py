@@ -214,6 +214,7 @@ def test_rejected_or_empty_chunks_leave_the_buffer_unchanged():
     with pytest.raises(TypeError, match="incompatible"):
         tree.partial_fit(X[:2], ["a", "b"])
     tree.partial_fit(np.empty((0, 3)), [])
+    tree.partial_fit([], [])
     assert tree.n_buffered_ == 10
 
     # Chunks are copied: changing the caller's array later does not alter the buffer
@@ -246,10 +247,11 @@ def _fitted():
         (lambda: DecisionTreeClassifier(buffer_size=0), ValueError, "buffer_size"),
         (lambda: DecisionTreeClassifier(buffer_size=2.5), TypeError, "buffer_size"),
         (lambda: DecisionTreeClassifier(buffer_size=True), TypeError, "buffer_size"),
+        (lambda: _fitted().export_text(decimals=-1), ValueError, "decimals"),
     ],
     ids=["unfitted", "n_features", "1d_X", "nan", "inf", "length", "text_X",
          "depth_0", "depth_float", "min_split", "max_features", "criterion",
-         "buffer_0", "buffer_float", "buffer_bool"],
+         "buffer_0", "buffer_float", "buffer_bool", "decimals"],
 )
 def test_invalid_input_raises_informative_errors(call, error, match):
     with pytest.raises(error, match=match):

@@ -50,7 +50,7 @@ def load_stream(step: int = 1):
     """Features (NaN where missing) and labels of stream.csv, keeping every ``step``-th row."""
     X = load_csv(DATA, usecols=FEATURES, dtype=float)
     y = load_csv(DATA, usecols="label", dtype=int).ravel()
-    
+
     return X[::step], y[::step]
 
 
@@ -132,7 +132,7 @@ def sweep_table(rows) -> str:
              "|---:|---:|---:|---:|---:|---:|---:|"]
     lines += [f"| {r['buffer_size']:,} | {r['retrains']} | {r['total_ms']:.1f} ms | {r['mean_ms']:.2f} ms "
               f"| {r['final_accuracy']:.3f} | {r['after_drift']:.3f} | {r['peak_kb']:.1f} kB |" for r in rows]
-    
+
     return "\n".join(lines)
 
 

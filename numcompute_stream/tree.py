@@ -361,7 +361,7 @@ class DecisionTreeClassifier:
         later changes to the caller's arrays do not affect the buffer.
         Time: O(n) per call, plus a retrain when the buffer fills.
         """
-        if np.ndim(X) == 2 and np.shape(X)[0] == 0 and np.size(y) == 0:
+        if np.ndim(X) in (1, 2) and np.shape(X)[0] == 0 and np.size(y) == 0:
             return self
 
         X, y = _check_Xy(X, y)
@@ -702,14 +702,17 @@ class DecisionTreeClassifier:
         ------
         RuntimeError
             If the tree is not fitted.
+        TypeError
+            If ``decimals`` is not an integer.
         ValueError
-            If ``feature_names`` has the wrong length.
+            If ``feature_names`` has the wrong length or ``decimals`` < 0.
 
         Notes
         -----
         Time and space: O(n_nodes).
         """
         self._check_fitted()
+        _check_int(decimals, "decimals", minimum=0)
 
         if feature_names is None:
             feature_names = [f"x{j}" for j in range(self.n_features_in_)]
